@@ -1,11 +1,11 @@
-# multiBTC Holders — Verification & Authorization Portal
+# multiBTC Holders- Verification & Authorization Portal
 
 A coordinated‑claim portal for **multiBTC** holders pursuing asset‑specific recovery in the **Multichain Foundation Ltd.** liquidation.
 
 - **Live:** https://7wy2p-aqaaa-aaaah-quska-cai.icp0.io/
 - **Court records:**
-  - Singapore High Court — **HC/CWU 134/2025** (KPMG liquidator, May 2025)
-  - U.S. Bankruptcy Court SDNY — **Case 25‑12340‑DSJ**
+  - Singapore High Court - **HC/CWU 134/2025** (KPMG liquidator, May 2025)
+  - U.S. Bankruptcy Court SDNY - **Case 25‑12340‑DSJ**
 
 Every wallet attestation is cryptographically signed by the holder's EVM key, bound to a continuous **Internet Identity** session, stored with full revision history on the **Internet Computer**, and rendered as an admissible evidentiary record for KPMG and the courts.
 
@@ -17,12 +17,12 @@ The portal collects evidence sufficient for three independent downstream consume
 
 | Layer | Purpose | Captured fields |
 |---|---|---|
-| **1 — Identity** | Solicitor retainer | legal name, DOB, nationality, country of residence, email, Telegram, preferred comm channel |
-| **2 — Wallets & holdings** | Claim quantification | EVM addresses (up to 5 per holder), per‑wallet ECDSA signatures, detected balances on Ethereum / BSC / Polygon / Canto, position type (raw / LP / vault / other) + protocol, bridge‑redemption tx hashes, pre‑/post‑incident timing, post‑incident acquisition history, supporting tx hashes (up to 10) |
-| **3 — KPMG PoD status** | Liquidator coordination | filed yes/no, date, reference number, needs‑help flag |
-| **4 — Authorization** | Group representation mandate | explicit consent to be represented, fee‑structure ack, group‑coordination ack, penalty‑of‑perjury truthfulness attestation — committed by the per‑wallet signature |
-| **5 — Funding** | Funding model | upfront cost‑share / proportional to claim / litigation funding / undecided + preferred payment method |
-| **6 — Optional** | Strength of record | naming preference, other Multichain token claims, supporting documentation notes |
+| **1 Identity** | Solicitor retainer | legal name, DOB, nationality, country of residence, email, Telegram, preferred comm channel |
+| **2 Wallets & holdings** | Claim quantification | EVM addresses (up to 5 per holder), per‑wallet ECDSA signatures, detected balances on Ethereum / BSC / Polygon / Canto, position type (raw / LP / vault / other) + protocol, bridge‑redemption tx hashes, pre‑/post‑incident timing, post‑incident acquisition history, supporting tx hashes (up to 10) |
+| **3 KPMG PoD status** | Liquidator coordination | filed yes/no, date, reference number, needs‑help flag |
+| ** Authorization** | Group representation mandate | explicit consent to be represented, fee‑structure ack, group‑coordination ack, penalty‑of‑perjury truthfulness attestation committed by the per‑wallet signature |
+| **5 Funding** | Funding model | upfront cost‑share / proportional to claim / litigation funding / undecided + preferred payment method |
+| **6 Optional** | Strength of record | naming preference, other Multichain token claims, supporting documentation notes |
 
 Each per‑wallet attestation is signed via **EIP‑191 `personal_sign`** against a canonical message that includes the wallet address, the linked II principal, the revision number, a **SHA‑256 commitment** to every form field, an ISO‑8601 timestamp, and a server‑issued UUID nonce. The backend re‑computes the commitment, re‑builds the canonical message, recovers the signer via `k256`, and only persists the record when the recovered address matches the claimed wallet. Edits never overwrite — each `update_*` call appends a new revision to a stable log so the full audit trail is retrievable per holder and per wallet.
 
