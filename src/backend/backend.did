@@ -1,0 +1,231 @@
+type CommChannel = variant {
+  Email;
+  Telegram;
+  Other : text;
+};
+
+type FeePreference = variant {
+  UpfrontCostShare;
+  LitigationFunding;
+  ProportionalToClaim;
+  Undecided;
+};
+
+type NamingPreference = variant {
+  WillingToBeNamed;
+  AnonymousViaRepresentative;
+};
+
+type PositionType = variant {
+  RawToken;
+  Lp : record { protocol : text; pool : text };
+  Vault : record { protocol : text; name : text };
+  Other : text;
+};
+
+type PositionDetail = record {
+  chain : text;
+  kind : PositionType;
+  declared_multibtc : nat;
+};
+
+type BridgeAttempt = record {
+  chain : text;
+  tx_hash : text;
+  description : opt text;
+};
+
+type PostIncidentAcquisition = record {
+  acquisition_date_iso : text;
+  chain : text;
+  amount_multibtc : nat;
+  price_paid_usd : opt float64;
+  notes : opt text;
+};
+
+type HolderProfile = record {
+  revision : nat32;
+  "principal" : principal;
+  legal_name : text;
+  date_of_birth_iso : text;
+  nationality : text;
+  country_of_residence : text;
+  email : text;
+  telegram_handle : opt text;
+  preferred_comm_channel : CommChannel;
+  has_filed_pod : bool;
+  pod_filed_date_iso : opt text;
+  pod_reference : opt text;
+  needs_help_filing_pod : bool;
+  consent_group_representation : bool;
+  consent_data_use_for_legal : bool;
+  ack_engagement_letter_to_follow : bool;
+  ack_fee_structure : bool;
+  ack_group_strategy_coordinated : bool;
+  ack_site_not_affiliated : bool;
+  truthfully_attested : bool;
+  fee_preference : FeePreference;
+  preferred_payment_method : opt text;
+  naming_preference : NamingPreference;
+  other_multichain_claims : opt text;
+  additional_documentation_notes : opt text;
+  submitted_at_ns : nat64;
+};
+
+type WalletAttestation = record {
+  revision : nat32;
+  wallet_address : text;
+  linked_principal : principal;
+  detected_eth : nat;
+  detected_bsc : nat;
+  detected_polygon : nat;
+  detected_canto : nat;
+  positions : vec PositionDetail;
+  approximate_total_claim : opt nat;
+  held_pre_incident : bool;
+  acquired_post_incident : bool;
+  post_incident_acquisitions : vec PostIncidentAcquisition;
+  attempted_bridge_redemption : bool;
+  bridge_attempts : vec BridgeAttempt;
+  pod_filed_for_this_wallet : bool;
+  pod_reference_for_this_wallet : opt text;
+  support_tx_hashes : vec text;
+  signed_message : text;
+  signature : text;
+  nonce : text;
+  signed_at_iso : text;
+  data_commitment_sha256 : text;
+  submitted_at_ns : nat64;
+};
+
+type LinkPayload = record {
+  wallet_address : text;
+  signature : text;
+  nonce : text;
+  signed_at_iso : text;
+};
+
+type HolderPayload = record {
+  legal_name : text;
+  date_of_birth_iso : text;
+  nationality : text;
+  country_of_residence : text;
+  email : text;
+  telegram_handle : opt text;
+  preferred_comm_channel : CommChannel;
+  has_filed_pod : bool;
+  pod_filed_date_iso : opt text;
+  pod_reference : opt text;
+  needs_help_filing_pod : bool;
+  consent_group_representation : bool;
+  consent_data_use_for_legal : bool;
+  ack_engagement_letter_to_follow : bool;
+  ack_fee_structure : bool;
+  ack_group_strategy_coordinated : bool;
+  ack_site_not_affiliated : bool;
+  truthfully_attested : bool;
+  fee_preference : FeePreference;
+  preferred_payment_method : opt text;
+  naming_preference : NamingPreference;
+  other_multichain_claims : opt text;
+  additional_documentation_notes : opt text;
+};
+
+type AttestPayload = record {
+  wallet_address : text;
+  detected_eth : nat;
+  detected_bsc : nat;
+  detected_polygon : nat;
+  detected_canto : nat;
+  positions : vec PositionDetail;
+  approximate_total_claim : opt nat;
+  held_pre_incident : bool;
+  acquired_post_incident : bool;
+  post_incident_acquisitions : vec PostIncidentAcquisition;
+  attempted_bridge_redemption : bool;
+  bridge_attempts : vec BridgeAttempt;
+  pod_filed_for_this_wallet : bool;
+  pod_reference_for_this_wallet : opt text;
+  support_tx_hashes : vec text;
+  signature : text;
+  nonce : text;
+  signed_at_iso : text;
+  data_commitment_sha256 : text;
+};
+
+type AdminAuth = record {
+  signature : text;
+  nonce : text;
+  signed_at_iso : text;
+};
+
+type PublicStats = record {
+  total_holders : nat64;
+  total_wallets : nat64;
+  total_detected_eth : nat;
+  total_detected_bsc : nat;
+  total_detected_polygon : nat;
+  total_detected_canto : nat;
+  total_declared_claim : nat;
+  pre_incident_wallets : nat64;
+  post_incident_wallets : nat64;
+  pod_filed_holders : nat64;
+  last_submission_at_ns : nat64;
+};
+
+type AdminHolderBundle = record {
+  profile : HolderProfile;
+  wallets : vec WalletAttestation;
+  holder_revisions : vec HolderProfile;
+  wallet_revisions : vec record { text; vec WalletAttestation };
+};
+
+type AdminInfo = record {
+  eth_address : text;
+  "principal" : opt principal;
+  max_edits : nat32;
+  max_wallets_per_principal : nat64;
+};
+
+type ResultUnit       = variant { Ok; Err : text };
+type ResultText       = variant { Ok : text; Err : text };
+type ResultHolder     = variant { Ok : HolderProfile; Err : text };
+type ResultWallet     = variant { Ok : WalletAttestation; Err : text };
+type ResultHolderList = variant { Ok : vec HolderProfile; Err : text };
+type ResultBundle     = variant { Ok : vec AdminHolderBundle; Err : text };
+
+service : {
+  // Identity binding
+  get_link_nonce            : (text) -> (ResultText);
+  link_wallet               : (LinkPayload) -> (ResultUnit);
+  get_principal_for_wallet  : (text) -> (opt principal) query;
+  get_wallets_for_principal : () -> (vec text) query;
+
+  // Holder layer
+  submit_holder             : (HolderPayload) -> (ResultHolder);
+  update_holder             : (HolderPayload) -> (ResultHolder);
+  get_my_holder             : () -> (opt HolderProfile) query;
+  get_holder_revisions      : () -> (vec HolderProfile) query;
+
+  // Wallet attestation layer
+  get_attest_nonce          : (text) -> (ResultText);
+  submit_wallet_attestation : (AttestPayload) -> (ResultWallet);
+  update_wallet_attestation : (AttestPayload) -> (ResultWallet);
+  get_my_wallets            : () -> (vec WalletAttestation) query;
+  get_wallet_revisions      : (text) -> (vec WalletAttestation) query;
+
+  // Public
+  get_public_stats          : () -> (PublicStats) query;
+
+  // Admin config (controller-only setters; public getter)
+  get_admin_info            : () -> (AdminInfo) query;
+  am_i_controller           : () -> (bool) query;
+  set_admin_eth_address     : (text) -> (ResultUnit);
+  set_admin_principal       : (opt principal) -> (ResultUnit);
+
+  // Admin (dual-factor: II principal == admin_principal AND signature recovers to admin_eth)
+  get_admin_nonce           : () -> (ResultText);
+  admin_list_holders        : (AdminAuth) -> (ResultHolderList) query;
+  admin_list_holders_full   : (AdminAuth) -> (ResultBundle) query;
+  admin_export_csv          : (AdminAuth) -> (ResultText) query;
+};
