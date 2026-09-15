@@ -52,3 +52,6 @@ identity.json
 
 # standalone verifier deps
 verify/node_modules/
+
+# tsc -b emits these next to the sources during `npm run build`
+src/frontend/src/**/*.js

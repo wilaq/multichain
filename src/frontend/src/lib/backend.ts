@@ -193,9 +193,7 @@ export const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
     holder_revisions: IDL.Nat64,
     wallet_latest: IDL.Nat64,
     wallet_revisions: IDL.Nat64,
-    link_nonces: IDL.Nat64,
-    attest_nonces: IDL.Nat64,
-    admin_nonces: IDL.Nat64,
+    nonces: IDL.Nat64,
   });
   const RReset = IDL.Variant({ Ok: ResetCounts, Err: IDL.Text });
 
@@ -427,9 +425,7 @@ export interface ResetCounts {
   holder_revisions: bigint;
   wallet_latest: bigint;
   wallet_revisions: bigint;
-  link_nonces: bigint;
-  attest_nonces: bigint;
-  admin_nonces: bigint;
+  nonces: bigint;
 }
 
 export interface BackendService {

@@ -194,9 +194,7 @@ type ResetCounts = record {
   holder_revisions : nat64;
   wallet_latest : nat64;
   wallet_revisions : nat64;
-  link_nonces : nat64;
-  attest_nonces : nat64;
-  admin_nonces : nat64;
+  nonces : nat64;
 };
 
 type WalletLinkStatus = variant { Unlinked; LinkedToCaller; LinkedToOther };

@@ -22,9 +22,19 @@ const MEM_HOLDER_LATEST: MemoryId = MemoryId::new(2);
 const MEM_HOLDER_REVISIONS: MemoryId = MemoryId::new(3);
 const MEM_WALLET_LATEST: MemoryId = MemoryId::new(4);
 const MEM_WALLET_REVISIONS: MemoryId = MemoryId::new(5);
-const MEM_LINK_NONCES: MemoryId = MemoryId::new(6);
-const MEM_ATTEST_NONCES: MemoryId = MemoryId::new(7);
-const MEM_ADMIN_NONCES: MemoryId = MemoryId::new(8);
+// 6, 7 and 8 held the old `EthAddress -> NonceEntry` maps. Nonces are now keyed
+// by (purpose, caller principal), which changes the stable node layout, and
+// `StableBTreeMap::load` does NOT assert the stored bounds against the new ones
+// -- it silently keeps the old page size and the canister then traps reading its
+// own nodes (verified on a local upgrade from the deployed build). So those
+// regions are retired rather than reinterpreted, and all three nonce kinds share
+// one virgin region. Never reuse 6, 7 or 8.
+const MEM_NONCES: MemoryId = MemoryId::new(11);
+
+// Nonce purposes, the first byte of every NonceKey.
+const NONCE_LINK: u8 = 0;
+const NONCE_ATTEST: u8 = 1;
+const NONCE_ADMIN: u8 = 2;
 const MEM_ADMIN_ETH: MemoryId = MemoryId::new(9);
 const MEM_ADMIN_PRINCIPAL: MemoryId = MemoryId::new(10);
 
@@ -57,14 +67,8 @@ thread_local! {
     static WALLET_REVISIONS: RefCell<StableBTreeMap<AddrRevKey, WalletAttestation, Mem>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_WALLET_REVISIONS))));
 
-    static LINK_NONCES: RefCell<StableBTreeMap<PrincipalVal, NonceEntry, Mem>> =
-        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_LINK_NONCES))));
-
-    static ATTEST_NONCES: RefCell<StableBTreeMap<PrincipalVal, NonceEntry, Mem>> =
-        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_ATTEST_NONCES))));
-
-    static ADMIN_NONCES: RefCell<StableBTreeMap<PrincipalVal, NonceEntry, Mem>> =
-        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_ADMIN_NONCES))));
+    static NONCES: RefCell<StableBTreeMap<NonceKey, NonceEntry, Mem>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_NONCES))));
 
     static ADMIN_ETH: RefCell<StableBTreeMap<u8, EthAddress, Mem>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_ADMIN_ETH))));
@@ -74,7 +78,7 @@ thread_local! {
 
     // Rotating start point for the expired-nonce sweep. Heap only -- it resets on
     // upgrade, which costs nothing but a single restarted sweep pass.
-    static SWEEP_CURSOR: RefCell<Option<PrincipalVal>> = const { RefCell::new(None) };
+    static SWEEP_CURSOR: RefCell<Option<NonceKey>> = const { RefCell::new(None) };
 }
 
 // `k256` and friends pull in `getrandom` but we never actually invoke its
@@ -151,9 +155,9 @@ fn nonce_expired(entry: &NonceEntry, ttl_ns: u64) -> bool {
 /// the nonce maps ever get big enough for a full pass to matter.
 const SWEEP_BATCH: usize = 20;
 
-fn sweep_expired(map: &RefCell<StableBTreeMap<PrincipalVal, NonceEntry, Mem>>, ttl_ns: u64) {
+fn sweep_expired(map: &RefCell<StableBTreeMap<NonceKey, NonceEntry, Mem>>, ttl_ns: u64) {
     let start = SWEEP_CURSOR.with(|c| c.borrow().clone());
-    let batch: Vec<(PrincipalVal, NonceEntry)> = {
+    let batch: Vec<(NonceKey, NonceEntry)> = {
         let m = map.borrow();
         match start {
             Some(k) => m.range(k..).take(SWEEP_BATCH).collect(),
@@ -176,29 +180,30 @@ fn sweep_expired(map: &RefCell<StableBTreeMap<PrincipalVal, NonceEntry, Mem>>, t
 /// caller, so one principal can never invalidate another's in-flight nonce, and
 /// can never hold more than one row per map.
 async fn issue_nonce(
-    map: &'static std::thread::LocalKey<RefCell<StableBTreeMap<PrincipalVal, NonceEntry, Mem>>>,
+    purpose: u8,
     caller: Principal,
     addr: EthAddress,
     ttl_ns: u64,
 ) -> Result<String, String> {
     let nonce = nonce::fresh_uuid_v4().await?;
     let entry = NonceEntry { nonce: nonce.clone(), addr, issued_at_ns: now_ns() };
-    map.with(|m| {
+    NONCES.with(|m| {
         sweep_expired(m, ttl_ns);
-        m.borrow_mut().insert(PrincipalVal(caller), entry);
+        m.borrow_mut().insert(NonceKey(purpose, caller), entry);
     });
     Ok(nonce)
 }
 
-fn nonexpired_nonce(
+fn consume_nonce(
+    purpose: u8,
     caller: Principal,
     addr: &EthAddress,
     nonce: &str,
     ttl_ns: u64,
-    map: &mut StableBTreeMap<PrincipalVal, NonceEntry, Mem>,
 ) -> Result<(), String> {
-    let key = PrincipalVal(caller);
-    let entry = map.get(&key).ok_or("no outstanding nonce; request one first")?;
+    let key = NonceKey(purpose, caller);
+    let mut map = NONCES.with(|m| m.borrow().get(&key)).map(|e| (key.clone(), e));
+    let (key, entry) = map.take().ok_or("no outstanding nonce; request one first")?;
     if entry.nonce != nonce {
         return Err("nonce mismatch".into());
     }
@@ -208,7 +213,7 @@ fn nonexpired_nonce(
     if nonce_expired(&entry, ttl_ns) {
         return Err("nonce expired".into());
     }
-    map.remove(&key);
+    NONCES.with(|m| m.borrow_mut().remove(&key));
     Ok(())
 }
 
@@ -236,7 +241,7 @@ fn wallet_revs_of(a: EthAddress) -> std::ops::RangeInclusive<AddrRevKey> {
 async fn get_link_nonce(eth_address: String) -> Result<String, String> {
     let caller = caller_or_err()?;
     let addr = parse_addr(&eth_address)?;
-    issue_nonce(&LINK_NONCES, caller, addr, NONCE_TTL_NS).await
+    issue_nonce(NONCE_LINK, caller, addr, NONCE_TTL_NS).await
 }
 
 #[update]
@@ -265,9 +270,7 @@ fn link_wallet(payload: LinkPayload) -> Result<(), String> {
     }
 
     // Consume nonce.
-    LINK_NONCES.with(|m| {
-        nonexpired_nonce(caller, &addr, &payload.nonce, NONCE_TTL_NS, &mut m.borrow_mut())
-    })?;
+    consume_nonce(NONCE_LINK, caller, &addr, &payload.nonce, NONCE_TTL_NS)?;
 
     // Rebuild canonical link message; recover address from signature.
     let msg = message::build_link_message(
@@ -443,7 +446,7 @@ fn get_holder_revisions() -> Vec<HolderProfile> {
 async fn get_attest_nonce(eth_address: String) -> Result<String, String> {
     let caller = caller_or_err()?;
     let addr = parse_addr(&eth_address)?;
-    issue_nonce(&ATTEST_NONCES, caller, addr, NONCE_TTL_NS).await
+    issue_nonce(NONCE_ATTEST, caller, addr, NONCE_TTL_NS).await
 }
 
 fn ensure_acknowledged(holder: &HolderProfile) -> Result<(), String> {
@@ -596,9 +599,7 @@ fn submit_or_update(
     }
 
     // Consume nonce.
-    ATTEST_NONCES.with(|m| {
-        nonexpired_nonce(caller, &addr, &payload.nonce, NONCE_TTL_NS, &mut m.borrow_mut())
-    })?;
+    consume_nonce(NONCE_ATTEST, caller, &addr, &payload.nonce, NONCE_TTL_NS)?;
 
     // Rebuild canonical attestation message and recover signer.
     let msg = message::build_attestation_message(
@@ -761,7 +762,7 @@ async fn get_admin_nonce() -> Result<String, String> {
                 .into(),
         );
     }
-    issue_nonce(&ADMIN_NONCES, caller, current_admin_eth(), ADMIN_NONCE_TTL_NS).await
+    issue_nonce(NONCE_ADMIN, caller, current_admin_eth(), ADMIN_NONCE_TTL_NS).await
 }
 
 fn verify_admin_auth(auth: &AdminAuth) -> Result<(), String> {
@@ -775,9 +776,7 @@ fn verify_admin_auth(auth: &AdminAuth) -> Result<(), String> {
     // Consumes the nonce. This only actually sticks because every caller of this
     // helper is an #[update]; as #[query]s the removal was rolled back and the
     // same (nonce, signature) pair stayed replayable for the whole TTL.
-    ADMIN_NONCES.with(|m| {
-        nonexpired_nonce(caller, &admin, &auth.nonce, ADMIN_NONCE_TTL_NS, &mut m.borrow_mut())
-    })?;
+    consume_nonce(NONCE_ADMIN, caller, &admin, &auth.nonce, ADMIN_NONCE_TTL_NS)?;
     let msg = message::build_admin_message(&auth.signed_at_iso, &auth.nonce);
     let recovered = verify::recover_eth_address(&msg, &auth.signature)?;
     if recovered != admin.0 {
@@ -842,9 +841,7 @@ pub struct ResetCounts {
     pub holder_revisions: u64,
     pub wallet_latest: u64,
     pub wallet_revisions: u64,
-    pub link_nonces: u64,
-    pub attest_nonces: u64,
-    pub admin_nonces: u64,
+    pub nonces: u64,
 }
 
 // Wipes all holder/wallet/nonce data. ADMIN_ETH and ADMIN_PRINCIPAL are
@@ -871,9 +868,7 @@ fn admin_reset_data() -> Result<ResetCounts, String> {
     HOLDER_REVISIONS.with(|m| counts.holder_revisions = drain(m));
     WALLET_LATEST.with(|m| counts.wallet_latest = drain(m));
     WALLET_REVISIONS.with(|m| counts.wallet_revisions = drain(m));
-    LINK_NONCES.with(|m| counts.link_nonces = drain(m));
-    ATTEST_NONCES.with(|m| counts.attest_nonces = drain(m));
-    ADMIN_NONCES.with(|m| counts.admin_nonces = drain(m));
+    NONCES.with(|m| counts.nonces = drain(m));
 
     Ok(counts)
 }
@@ -1070,4 +1065,5 @@ candid::export_service!();
 fn export_candid() -> String {
     __export_service()
 }
+
 

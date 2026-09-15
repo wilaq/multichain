@@ -128,6 +128,29 @@ impl Storable for PrincipalRevKey {
     const BOUND: Bound = Bound::Bounded { max_size: 34, is_fixed_size: false };
 }
 
+/// (purpose, caller principal). Keying nonces by the caller rather than by the
+/// wallet address is what stops one user invalidating another's in-flight nonce,
+/// and caps each principal at one outstanding nonce per purpose.
+/// Encoded as: 1 byte purpose | 1 byte principal len | principal bytes (max 29).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NonceKey(pub u8, pub Principal);
+
+impl Storable for NonceKey {
+    fn to_bytes(&self) -> Cow<[u8]> {
+        let p = self.1.as_slice();
+        let mut v = Vec::with_capacity(2 + p.len());
+        v.push(self.0);
+        v.push(p.len() as u8);
+        v.extend_from_slice(p);
+        Cow::Owned(v)
+    }
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        let plen = bytes[1] as usize;
+        NonceKey(bytes[0], Principal::from_slice(&bytes[2..2 + plen]))
+    }
+    const BOUND: Bound = Bound::Bounded { max_size: 31, is_fixed_size: false };
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AddrRevKey(pub EthAddress, pub u32);
 
