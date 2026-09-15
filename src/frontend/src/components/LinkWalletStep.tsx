@@ -24,10 +24,10 @@ export function LinkWalletStep({
     setBusy(true);
     try {
       const actor = await backendActor();
-      // Conflict check first.
-      const existing = await actor.get_principal_for_wallet(address.toLowerCase());
-      const existingP = existing[0];
-      if (existingP && existingP.toText() !== principal.toText()) {
+      // Conflict check first. The backend only tells us whether it is taken —
+      // never by whom — so this cannot be used to map addresses to identities.
+      const status = await actor.get_wallet_link_status(address.toLowerCase());
+      if ('LinkedToOther' in status) {
         throw new Error(
           'This wallet is already bound to a different Internet Identity. Sign in with that identity, or use a different wallet.',
         );

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { backendActor } from '../lib/auth';
-import { type WalletAttestation } from '../lib/backend';
+import { unwrap, type WalletAttestation } from '../lib/backend';
 import { formatMultibtc, formatTsNs } from '../lib/format';
 
 export function RevisionHistory({ walletAddress }: { walletAddress: string }) {
@@ -12,8 +12,12 @@ export function RevisionHistory({ walletAddress }: { walletAddress: string }) {
     let cancelled = false;
     (async () => {
       const actor = await backendActor();
-      const r = await actor.get_wallet_revisions(walletAddress.toLowerCase());
-      if (!cancelled) setRevs(r);
+      try {
+        const r = unwrap(await actor.get_wallet_revisions(walletAddress.toLowerCase()));
+        if (!cancelled) setRevs(r);
+      } catch {
+        if (!cancelled) setRevs([]);
+      }
     })();
     return () => {
       cancelled = true;

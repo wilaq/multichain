@@ -46,3 +46,9 @@ yarn-error.log*
 *.pem
 *.p12
 identity.json
+
+# dfx regenerates this from dfx.json output_env_file; it also leaks local paths.
+.env
+
+# standalone verifier deps
+verify/node_modules/

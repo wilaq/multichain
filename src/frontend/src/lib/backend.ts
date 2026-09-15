@@ -180,11 +180,29 @@ export const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
   const RWallet = IDL.Variant({ Ok: WalletAttestation, Err: IDL.Text });
   const RHolderList = IDL.Variant({ Ok: IDL.Vec(HolderProfile), Err: IDL.Text });
   const RBundle = IDL.Variant({ Ok: IDL.Vec(AdminHolderBundle), Err: IDL.Text });
+  const RWalletList = IDL.Variant({ Ok: IDL.Vec(WalletAttestation), Err: IDL.Text });
+  const WalletLinkStatus = IDL.Variant({
+    Unlinked: IDL.Null,
+    LinkedToCaller: IDL.Null,
+    LinkedToOther: IDL.Null,
+  });
+  const ResetCounts = IDL.Record({
+    wallet_to_principal: IDL.Nat64,
+    principal_wallets: IDL.Nat64,
+    holder_latest: IDL.Nat64,
+    holder_revisions: IDL.Nat64,
+    wallet_latest: IDL.Nat64,
+    wallet_revisions: IDL.Nat64,
+    link_nonces: IDL.Nat64,
+    attest_nonces: IDL.Nat64,
+    admin_nonces: IDL.Nat64,
+  });
+  const RReset = IDL.Variant({ Ok: ResetCounts, Err: IDL.Text });
 
   return IDL.Service({
     get_link_nonce: IDL.Func([IDL.Text], [RText], []),
     link_wallet: IDL.Func([LinkPayload], [RUnit], []),
-    get_principal_for_wallet: IDL.Func([IDL.Text], [IDL.Opt(IDL.Principal)], ['query']),
+    get_wallet_link_status: IDL.Func([IDL.Text], [WalletLinkStatus], ['query']),
     get_wallets_for_principal: IDL.Func([], [IDL.Vec(IDL.Text)], ['query']),
 
     submit_holder: IDL.Func([HolderPayload], [RHolder], []),
@@ -196,7 +214,7 @@ export const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
     submit_wallet_attestation: IDL.Func([AttestPayload], [RWallet], []),
     update_wallet_attestation: IDL.Func([AttestPayload], [RWallet], []),
     get_my_wallets: IDL.Func([], [IDL.Vec(WalletAttestation)], ['query']),
-    get_wallet_revisions: IDL.Func([IDL.Text], [IDL.Vec(WalletAttestation)], ['query']),
+    get_wallet_revisions: IDL.Func([IDL.Text], [RWalletList], ['query']),
 
     get_public_stats: IDL.Func([], [PublicStats], ['query']),
 
@@ -204,11 +222,12 @@ export const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
     am_i_controller: IDL.Func([], [IDL.Bool], ['query']),
     set_admin_eth_address: IDL.Func([IDL.Text], [RUnit], []),
     set_admin_principal: IDL.Func([IDL.Opt(IDL.Principal)], [RUnit], []),
+    admin_reset_data: IDL.Func([], [RReset], []),
 
     get_admin_nonce: IDL.Func([], [RText], []),
-    admin_list_holders: IDL.Func([AdminAuth], [RHolderList], ['query']),
-    admin_list_holders_full: IDL.Func([AdminAuth], [RBundle], ['query']),
-    admin_export_csv: IDL.Func([AdminAuth], [RText], ['query']),
+    admin_list_holders: IDL.Func([AdminAuth], [RHolderList], []),
+    admin_list_holders_full: IDL.Func([AdminAuth], [RBundle], []),
+    admin_export_csv: IDL.Func([AdminAuth], [RText], []),
   });
 };
 
@@ -396,10 +415,27 @@ export interface AdminInfo {
 
 export type R<T> = { Ok: T } | { Err: string };
 
+export type WalletLinkStatus =
+  | { Unlinked: null }
+  | { LinkedToCaller: null }
+  | { LinkedToOther: null };
+
+export interface ResetCounts {
+  wallet_to_principal: bigint;
+  principal_wallets: bigint;
+  holder_latest: bigint;
+  holder_revisions: bigint;
+  wallet_latest: bigint;
+  wallet_revisions: bigint;
+  link_nonces: bigint;
+  attest_nonces: bigint;
+  admin_nonces: bigint;
+}
+
 export interface BackendService {
   get_link_nonce: (eth_address: string) => Promise<R<string>>;
   link_wallet: (payload: LinkPayload) => Promise<R<null>>;
-  get_principal_for_wallet: (eth_address: string) => Promise<[] | [Principal]>;
+  get_wallet_link_status: (eth_address: string) => Promise<WalletLinkStatus>;
   get_wallets_for_principal: () => Promise<string[]>;
 
   submit_holder: (payload: HolderPayload) => Promise<R<HolderProfile>>;
@@ -411,7 +447,7 @@ export interface BackendService {
   submit_wallet_attestation: (payload: AttestPayload) => Promise<R<WalletAttestation>>;
   update_wallet_attestation: (payload: AttestPayload) => Promise<R<WalletAttestation>>;
   get_my_wallets: () => Promise<WalletAttestation[]>;
-  get_wallet_revisions: (eth_address: string) => Promise<WalletAttestation[]>;
+  get_wallet_revisions: (eth_address: string) => Promise<R<WalletAttestation[]>>;
 
   get_public_stats: () => Promise<PublicStats>;
 
@@ -419,6 +455,7 @@ export interface BackendService {
   am_i_controller: () => Promise<boolean>;
   set_admin_eth_address: (eth: string) => Promise<R<null>>;
   set_admin_principal: (p: [] | [Principal]) => Promise<R<null>>;
+  admin_reset_data: () => Promise<R<ResetCounts>>;
 
   get_admin_nonce: () => Promise<R<string>>;
   admin_list_holders: (auth: AdminAuth) => Promise<R<HolderProfile[]>>;

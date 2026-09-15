@@ -10,6 +10,7 @@ import {
   type BackendService,
 } from '../lib/backend';
 import { formatMultibtc, formatTsNs, shortAddress } from '../lib/format';
+import { BACKEND_CANISTER_ID } from '../lib/auth';
 import { ConnectWalletButton } from '../components/ConnectWalletDialog';
 import { AuthGate } from '../components/AuthGate';
 import { PrincipalChip } from '../components/PrincipalChip';
@@ -236,6 +237,44 @@ function AdminControls({ callerPrincipal }: { callerPrincipal: Principal }) {
     return { signature, nonce, signed_at_iso };
   }
 
+  /**
+   * Evidence bundle for verify/verify-attestation.mjs. A faithful dump of exactly
+   * what the canister returned (candid `opt` stays [] / [x], principals stay
+   * {"__principal__": ...}) plus a manifest, so nothing is reshaped between the
+   * canister and the verifier. BigInts become decimal strings because JSON has
+   * no integer type wide enough for u128.
+   */
+  async function downloadBundle() {
+    if (!bundles) return;
+    const body = JSON.stringify(bundles, (_k, v) =>
+      typeof v === 'bigint' ? v.toString() : v,
+    );
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body));
+    const body_sha256 = Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    const doc = {
+      manifest: {
+        spec: 'verify/SPEC.md',
+        canister_id: BACKEND_CANISTER_ID,
+        // Obtain the module hash from the IC itself, not from this page:
+        //   dfx canister info backend --network ic
+        module_hash: null,
+        exported_at_client_iso: new Date().toISOString(),
+        body_sha256,
+        note: 'exported_at is the operator browser clock and is not authoritative; submitted_at_ns on each record is IC consensus time.',
+      },
+      bundles: JSON.parse(body),
+    };
+    const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `multibtc-evidence-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   function downloadCsv() {
     if (!csv) return;
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
@@ -291,6 +330,11 @@ function AdminControls({ callerPrincipal }: { callerPrincipal: Principal }) {
             {csv && (
               <button type="button" className="btn-secondary" onClick={downloadCsv}>
                 Download CSV
+              </button>
+            )}
+            {bundles && (
+              <button type="button" className="btn-secondary" onClick={downloadBundle}>
+                Download evidence bundle (JSON)
               </button>
             )}
           </div>

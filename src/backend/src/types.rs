@@ -155,6 +155,10 @@ impl Storable for AddrRevKey {
 #[derive(Clone, Debug, CandidType, Serialize, Deserialize)]
 pub struct NonceEntry {
     pub nonce: String,
+    /// The address this nonce was issued for. Nonces are keyed by the *caller's*
+    /// principal (so nobody can clobber someone else's outstanding nonce), which
+    /// means the address has to be carried in the value and checked on consume.
+    pub addr: EthAddress,
     pub issued_at_ns: u64,
 }
 
@@ -165,7 +169,18 @@ impl Storable for NonceEntry {
     fn from_bytes(bytes: Cow<[u8]>) -> Self {
         Decode!(bytes.as_ref(), NonceEntry).expect("decode NonceEntry")
     }
-    const BOUND: Bound = Bound::Bounded { max_size: 128, is_fixed_size: false };
+    // 36-char uuid + 42-char "0x..." address + u64 + candid type table.
+    const BOUND: Bound = Bound::Bounded { max_size: 256, is_fixed_size: false };
+}
+
+/// What `get_wallet_link_status` may reveal. Deliberately *not* the bound
+/// principal: the frontend only needs to know whether the address is free, and
+/// returning the principal turned this into a public address -> identity oracle.
+#[derive(Clone, Copy, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WalletLinkStatus {
+    Unlinked,
+    LinkedToCaller,
+    LinkedToOther,
 }
 
 #[derive(Clone, Debug, CandidType, Serialize, Deserialize, PartialEq, Eq)]

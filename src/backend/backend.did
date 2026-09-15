@@ -187,18 +187,34 @@ type AdminInfo = record {
   max_wallets_per_principal : nat64;
 };
 
+type ResetCounts = record {
+  wallet_to_principal : nat64;
+  principal_wallets : nat64;
+  holder_latest : nat64;
+  holder_revisions : nat64;
+  wallet_latest : nat64;
+  wallet_revisions : nat64;
+  link_nonces : nat64;
+  attest_nonces : nat64;
+  admin_nonces : nat64;
+};
+
+type WalletLinkStatus = variant { Unlinked; LinkedToCaller; LinkedToOther };
+
 type ResultUnit       = variant { Ok; Err : text };
 type ResultText       = variant { Ok : text; Err : text };
 type ResultHolder     = variant { Ok : HolderProfile; Err : text };
 type ResultWallet     = variant { Ok : WalletAttestation; Err : text };
 type ResultHolderList = variant { Ok : vec HolderProfile; Err : text };
 type ResultBundle     = variant { Ok : vec AdminHolderBundle; Err : text };
+type ResultReset      = variant { Ok : ResetCounts; Err : text };
+type ResultWalletList = variant { Ok : vec WalletAttestation; Err : text };
 
 service : {
   // Identity binding
   get_link_nonce            : (text) -> (ResultText);
   link_wallet               : (LinkPayload) -> (ResultUnit);
-  get_principal_for_wallet  : (text) -> (opt principal) query;
+  get_wallet_link_status    : (text) -> (WalletLinkStatus) query;
   get_wallets_for_principal : () -> (vec text) query;
 
   // Holder layer
@@ -212,7 +228,7 @@ service : {
   submit_wallet_attestation : (AttestPayload) -> (ResultWallet);
   update_wallet_attestation : (AttestPayload) -> (ResultWallet);
   get_my_wallets            : () -> (vec WalletAttestation) query;
-  get_wallet_revisions      : (text) -> (vec WalletAttestation) query;
+  get_wallet_revisions      : (text) -> (ResultWalletList) query;
 
   // Public
   get_public_stats          : () -> (PublicStats) query;
@@ -222,10 +238,11 @@ service : {
   am_i_controller           : () -> (bool) query;
   set_admin_eth_address     : (text) -> (ResultUnit);
   set_admin_principal       : (opt principal) -> (ResultUnit);
+  admin_reset_data          : () -> (ResultReset);
 
   // Admin (dual-factor: II principal == admin_principal AND signature recovers to admin_eth)
   get_admin_nonce           : () -> (ResultText);
-  admin_list_holders        : (AdminAuth) -> (ResultHolderList) query;
-  admin_list_holders_full   : (AdminAuth) -> (ResultBundle) query;
-  admin_export_csv          : (AdminAuth) -> (ResultText) query;
+  admin_list_holders        : (AdminAuth) -> (ResultHolderList);
+  admin_list_holders_full   : (AdminAuth) -> (ResultBundle);
+  admin_export_csv          : (AdminAuth) -> (ResultText);
 };

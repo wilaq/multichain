@@ -65,8 +65,12 @@ const cantoRpcs = [
   'https://canto-rpc.ansybl.io',
 ];
 
-const WC_PROJECT_ID =
-  (import.meta as any).env?.VITE_WC_PROJECT_ID ?? 'a8c9f6d6e8a9c2f7e3b1a4d5e6f7c8b9';
+// The old hardcoded fallback was not a real project id — WalletConnect's own API
+// answers `{"error":"Project id is not valid - ..."}` for it, so the connector has
+// been failing in production. It is now opt-in: set VITE_WC_PROJECT_ID in .env and
+// the connector (and its ~450KB of bundle) comes back. Without one, offering the
+// button at all is worse than not offering it.
+const WC_PROJECT_ID = import.meta.env.VITE_WC_PROJECT_ID;
 
 export const wagmiConfig = createConfig({
   chains: [mainnet, bsc, polygon, canto],
@@ -78,16 +82,20 @@ export const wagmiConfig = createConfig({
   },
   connectors: [
     injected({ shimDisconnect: true }),
-    walletConnect({
-      projectId: WC_PROJECT_ID,
-      showQrModal: true,
-      metadata: {
-        name: 'multiBTC Holders Group',
-        description: 'Verification & Authorization Portal',
-        url: typeof window !== 'undefined' ? window.location.origin : '',
-        icons: [],
-      },
-    }),
+    ...(WC_PROJECT_ID
+      ? [
+          walletConnect({
+            projectId: WC_PROJECT_ID,
+            showQrModal: true,
+            metadata: {
+              name: 'multiBTC Holders Group',
+              description: 'Verification & Authorization Portal',
+              url: typeof window !== 'undefined' ? window.location.origin : '',
+              icons: [],
+            },
+          }),
+        ]
+      : []),
     // `preference: 'eoaOnly'` keeps the legacy extension/mobile-EOA flow and
     // skips Coinbase Smart Wallet (ERC-4337). EIP-1271 sigs are not supported
     // yet by our recovery path.
