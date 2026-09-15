@@ -5,18 +5,19 @@ import { LinkWalletStep } from './LinkWalletStep';
 import { WalletAttestationForm } from './WalletAttestationForm';
 import { RevisionHistory } from './RevisionHistory';
 import { formatMultibtc, shortAddress, formatTsNs } from '../lib/format';
-import type { WalletAttestation } from '../lib/backend';
+import type { HolderProfile, WalletAttestation } from '../lib/backend';
 import { anonymousBackendActor } from '../lib/auth';
 import { useAccount } from 'wagmi';
 
 interface Props {
   principal: Principal;
+  holder: HolderProfile;
   wallets: WalletAttestation[];
   linkedAddresses: string[];
   reload: () => Promise<void>;
 }
 
-export function WalletsPanel({ principal, wallets, linkedAddresses, reload }: Props) {
+export function WalletsPanel({ principal, holder, wallets, linkedAddresses, reload }: Props) {
   const [editing, setEditing] = useState<string | null>(null);
   const [addingNew, setAddingNew] = useState(false);
   const [justSavedAddr, setJustSavedAddr] = useState<string | null>(null);
@@ -113,12 +114,28 @@ export function WalletsPanel({ principal, wallets, linkedAddresses, reload }: Pr
               </span>{' '}
               multiBTC across {w.positions.length} position{w.positions.length === 1 ? '' : 's'}.
             </div>
+            {Number(w.holder_revision) !== Number(holder.revision) && (
+              <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                <strong>Needs re-signing.</strong> This signature covers holder profile revision{' '}
+                {Number(w.holder_revision)}, but your profile is now at revision{' '}
+                {Number(holder.revision)}. The signature still proves what you signed then — it just
+                no longer covers your current details. Re-sign to bring it up to date.{' '}
+                <button
+                  type="button"
+                  className="underline"
+                  onClick={() => setEditing(w.wallet_address)}
+                >
+                  Re-sign now
+                </button>
+              </div>
+            )}
             <RevisionHistory walletAddress={w.wallet_address} />
             {editing === w.wallet_address && (
               <div className="pt-3">
                 <WalletAttestationForm
                   walletAddress={w.wallet_address}
                   principal={principal}
+                  holder={holder}
                   initial={w}
                   onSaved={async () => {
                     setEditing(null);
@@ -154,6 +171,7 @@ export function WalletsPanel({ principal, wallets, linkedAddresses, reload }: Pr
                 <WalletAttestationForm
                   walletAddress={addr}
                   principal={principal}
+                  holder={holder}
                   initial={null}
                   onSaved={async () => {
                     setJustSavedAddr(addr);

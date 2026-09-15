@@ -520,10 +520,12 @@ fn build_attestation(
     payload: AttestPayload,
     principal: Principal,
     revision: u32,
+    holder_revision: u32,
     signed_message: String,
 ) -> WalletAttestation {
     WalletAttestation {
         revision,
+        holder_revision,
         wallet_address: payload.wallet_address.to_lowercase(),
         linked_principal: principal,
         detected_eth: payload.detected_eth,
@@ -592,8 +594,13 @@ fn submit_or_update(
         }
     };
 
+    // Bind the holder profile that is in force right now. `holder` was already
+    // fetched above for the acknowledgment check.
+    let holder_commit = commitment::commit_holder(&holder);
+
     // Recompute data_commitment_sha256 and compare to payload.
-    let expected_commit = commitment::commit_attest(&payload, &caller, revision);
+    let expected_commit =
+        commitment::commit_attest(&payload, &caller, revision, holder_rev, &holder_commit);
     if expected_commit != payload.data_commitment_sha256.trim_start_matches("0x") {
         return Err("data commitment mismatch (payload was tampered with after signing)".into());
     }
@@ -606,6 +613,10 @@ fn submit_or_update(
         &addr_lower,
         &caller.to_text(),
         revision,
+        &holder.legal_name,
+        &holder.date_of_birth_iso,
+        holder_rev,
+        &holder_commit,
         &expected_commit,
         &payload.signed_at_iso,
         &payload.nonce,
@@ -627,7 +638,7 @@ fn submit_or_update(
         ));
     }
 
-    let stored = build_attestation(payload, caller, revision, msg);
+    let stored = build_attestation(payload, caller, revision, holder_rev, msg);
     WALLET_REVISIONS.with(|m| {
         m.borrow_mut().insert(AddrRevKey(addr, revision), stored.clone())
     });
@@ -1065,5 +1076,6 @@ candid::export_service!();
 fn export_candid() -> String {
     __export_service()
 }
+
 
 

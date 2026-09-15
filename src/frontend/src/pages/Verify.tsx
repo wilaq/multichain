@@ -82,6 +82,7 @@ function VerifyContent({
       {holder ? (
         <WalletsPanel
           principal={principal}
+          holder={holder}
           wallets={wallets}
           linkedAddresses={linkedAddrs}
           reload={reload}

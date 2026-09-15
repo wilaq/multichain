@@ -74,6 +74,7 @@ type HolderProfile = record {
 
 type WalletAttestation = record {
   revision : nat32;
+  holder_revision : nat32;
   wallet_address : text;
   linked_principal : principal;
   detected_eth : nat;

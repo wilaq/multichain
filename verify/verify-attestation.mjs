@@ -81,11 +81,58 @@ function positionKind(kind) {
   }
 }
 
+function commChannelStr(c) {
+  const [tag] = Object.keys(c);
+  if (tag === 'Email' || tag === 'Telegram') return tag;
+  if (tag === 'Other') return `Other:${hexUtf8(c.Other)}`;
+  throw new Error(`unknown comm channel: ${tag}`);
+}
+const variantTag = (v, fallback) => (v && typeof v === 'object' ? Object.keys(v)[0] : v) ?? fallback;
+
+// ---------------------------------------------------------------------------
+// Holder canonical serialisation (SPEC.md §2b).
+//
+// The per-wallet signature commits to this, so the identity behind a claim is
+// covered by the signature rather than being mutable form state.
+// ---------------------------------------------------------------------------
+export function serialiseHolder(hp) {
+  const L = [];
+  L.push(`ack_engagement_letter_to_follow=${!!hp.ack_engagement_letter_to_follow}`);
+  L.push(`ack_fee_structure=${!!hp.ack_fee_structure}`);
+  L.push(`ack_group_strategy_coordinated=${!!hp.ack_group_strategy_coordinated}`);
+  L.push(`ack_site_not_affiliated=${!!hp.ack_site_not_affiliated}`);
+  L.push(`additional_documentation_notes=${optHex(hp.additional_documentation_notes)}`);
+  L.push(`consent_data_use_for_legal=${!!hp.consent_data_use_for_legal}`);
+  L.push(`consent_group_representation=${!!hp.consent_group_representation}`);
+  L.push(`country_of_residence=${hexUtf8(hp.country_of_residence)}`);
+  L.push(`date_of_birth_iso=${hexUtf8(hp.date_of_birth_iso)}`);
+  L.push(`email=${hexUtf8(hp.email)}`);
+  L.push(`fee_preference=${variantTag(hp.fee_preference, 'Undecided')}`);
+  L.push(`has_filed_pod=${!!hp.has_filed_pod}`);
+  L.push(`legal_name=${hexUtf8(hp.legal_name)}`);
+  L.push(`naming_preference=${variantTag(hp.naming_preference, 'AnonymousViaRepresentative')}`);
+  L.push(`nationality=${hexUtf8(hp.nationality)}`);
+  L.push(`needs_help_filing_pod=${!!hp.needs_help_filing_pod}`);
+  L.push(`other_multichain_claims=${optHex(hp.other_multichain_claims)}`);
+  L.push(`pod_filed_date_iso=${optHex(hp.pod_filed_date_iso)}`);
+  L.push(`pod_reference=${optHex(hp.pod_reference)}`);
+  L.push(`preferred_comm_channel=${commChannelStr(opt(hp.preferred_comm_channel))}`);
+  L.push(`preferred_payment_method=${optHex(hp.preferred_payment_method)}`);
+  L.push(`principal=${principalText(hp.principal)}`);
+  L.push(`revision=${Number(hp.revision)}`);
+  L.push(`submitted_at_ns=${nat(hp.submitted_at_ns)}`);
+  L.push(`telegram_handle=${optHex(hp.telegram_handle)}`);
+  L.push(`truthfully_attested=${!!hp.truthfully_attested}`);
+  return L.join('\n');
+}
+
+export const commitHolder = (hp) => toHex(sha256(enc.encode(serialiseHolder(hp))));
+
 // ---------------------------------------------------------------------------
 // Canonical serialisation (SPEC.md §2). Fixed lexicographic line order, values
 // hex-encoded so that a newline or '=' inside user text cannot forge a line.
 // ---------------------------------------------------------------------------
-export function serialiseAttest(r) {
+export function serialiseAttest(r, holderRevision, holderCommitment) {
   const L = [];
   L.push(`acquired_post_incident=${!!r.acquired_post_incident}`);
   L.push(`approximate_total_claim=${nat(r.approximate_total_claim)}`);
@@ -102,6 +149,8 @@ export function serialiseAttest(r) {
   L.push(`detected_eth=${nat(r.detected_eth)}`);
   L.push(`detected_polygon=${nat(r.detected_polygon)}`);
   L.push(`held_pre_incident=${!!r.held_pre_incident}`);
+  L.push(`holder_commitment=${holderCommitment}`);
+  L.push(`holder_revision=${holderRevision}`);
   L.push(`linked_principal=${principalText(r.linked_principal)}`);
   L.push(`pod_filed_for_this_wallet=${!!r.pod_filed_for_this_wallet}`);
   L.push(`pod_reference_for_this_wallet=${optHex(r.pod_reference_for_this_wallet)}`);
@@ -130,7 +179,8 @@ export function serialiseAttest(r) {
   return L.join('\n');
 }
 
-export const commitAttest = (r) => toHex(sha256(enc.encode(serialiseAttest(r))));
+export const commitAttest = (r, hRev, hCommit) =>
+  toHex(sha256(enc.encode(serialiseAttest(r, hRev, hCommit))));
 
 // ---------------------------------------------------------------------------
 // Canonical signed message (SPEC.md §3). The em dash is U+2014: the EIP-191
@@ -155,12 +205,26 @@ const ATTESTATION_BODY =
   '   to the best of my knowledge.\n' +
   '\n';
 
-export function buildAttestationMessage({ wallet, principal, revision, commitHex, signedAtIso, nonce }) {
+export function buildAttestationMessage({
+  wallet,
+  principal,
+  revision,
+  legalName,
+  dateOfBirthIso,
+  holderRevision,
+  holderCommitHex,
+  commitHex,
+  signedAtIso,
+  nonce,
+}) {
   return (
     ATTESTATION_BODY +
     `Wallet:           ${wallet}\n` +
     `Linked principal: ${principal}\n` +
     `Revision:         ${revision}\n` +
+    `Holder:           ${legalName}\n` +
+    `Date of birth:    ${dateOfBirthIso}\n` +
+    `Holder profile:   revision ${holderRevision}, 0x${holderCommitHex}\n` +
     `Data commitment:  0x${commitHex}\n` +
     `Timestamp:        ${signedAtIso}\n` +
     `Nonce:            ${nonce}`
@@ -197,14 +261,34 @@ export function recoverAddress(message, sigHex) {
 // ---------------------------------------------------------------------------
 // Per-record verification
 // ---------------------------------------------------------------------------
-export function verifyRecord(r) {
+export function verifyRecord(r, holderProfile) {
   const problems = [];
   const wallet = String(r.wallet_address).toLowerCase();
   const principal = principalText(r.linked_principal);
   const revision = Number(r.revision);
+  const holderRevision = Number(r.holder_revision);
+
+  if (!holderProfile) {
+    return {
+      wallet,
+      principal,
+      revision,
+      holderRevision,
+      problems: [
+        `holder profile revision ${holderRevision} is not in this export, so the identity ` +
+          `this signature covers cannot be checked`,
+      ],
+    };
+  }
+  if (Number(holderProfile.revision) !== holderRevision) {
+    problems.push(
+      `holder profile supplied is revision ${Number(holderProfile.revision)}, signature covers ${holderRevision}`,
+    );
+  }
+  const holderCommit = commitHolder(holderProfile);
 
   // 1. Re-derive the commitment from the payload the canister stored.
-  const preimage = serialiseAttest(r);
+  const preimage = serialiseAttest(r, holderRevision, holderCommit);
   const commit = toHex(sha256(enc.encode(preimage)));
   const storedCommit = String(r.data_commitment_sha256 ?? '').replace(/^0x/i, '').toLowerCase();
   if (commit !== storedCommit) {
@@ -219,6 +303,10 @@ export function verifyRecord(r) {
     wallet,
     principal,
     revision,
+    legalName: holderProfile.legal_name,
+    dateOfBirthIso: holderProfile.date_of_birth_iso,
+    holderRevision,
+    holderCommitHex: holderCommit,
     commitHex: commit,
     signedAtIso: r.signed_at_iso,
     nonce: r.nonce,
@@ -238,33 +326,51 @@ export function verifyRecord(r) {
     problems.push(`signature: ${e.message}`);
   }
 
-  return { wallet, principal, revision, commit, recovered, message, preimage, problems };
+  return {
+    wallet,
+    principal,
+    revision,
+    holderRevision,
+    legalName: holderProfile.legal_name,
+    commit,
+    holderCommit,
+    recovered,
+    message,
+    preimage,
+    problems,
+  };
 }
 
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
-function collectAttestations(doc) {
+/**
+ * Flatten an export into [attestation, holder profile it was signed against]
+ * pairs. Each bundle carries the holder's full revision history, so the exact
+ * revision a signature covers can be recovered even after later profile edits.
+ */
+function collectPairs(doc) {
+  const bundles = Array.isArray(doc?.bundles) ? doc.bundles : Array.isArray(doc) ? doc : [doc];
   const out = [];
-  const push = (a) => Array.isArray(a) && out.push(...a);
-  if (Array.isArray(doc)) {
-    // Either a bare array of attestations, or a bare array of bundles.
-    if (doc.length && doc[0] && 'wallet_address' in doc[0]) return doc;
-    doc.forEach(collectFromBundle);
-  } else if (doc && typeof doc === 'object') {
-    if ('bundles' in doc) doc.bundles.forEach(collectFromBundle);
-    else if ('wallet_address' in doc) out.push(doc);
+  for (const b of bundles) {
+    if (!b || typeof b !== 'object') continue;
+    const byRev = new Map();
+    for (const h of [...(b.holder_revisions ?? []), b.profile].filter(Boolean)) {
+      byRev.set(Number(h.revision), h);
+    }
+    const attestations = [
+      ...(b.wallets ?? []),
+      ...(b.wallet_revisions ?? []).flatMap((e) => (Array.isArray(e) ? e[1] ?? [] : [])),
+    ];
+    for (const a of attestations) {
+      if (!a || !('wallet_address' in a)) continue;
+      out.push([a, byRev.get(Number(a.holder_revision)) ?? null]);
+    }
   }
-  function collectFromBundle(b) {
-    push(b.wallets);
-    // wallet_revisions is vec record { text; vec WalletAttestation }, which
-    // agent-js renders as [addr, revs] pairs.
-    (b.wallet_revisions ?? []).forEach((entry) => push(Array.isArray(entry) ? entry[1] : entry?.[1]));
-  }
-  // De-duplicate: the latest revision appears in both `wallets` and `wallet_revisions`.
+  // The latest revision appears in both `wallets` and `wallet_revisions`.
   const seen = new Set();
-  return out.filter((r) => {
-    const k = `${String(r.wallet_address).toLowerCase()}#${r.revision}`;
+  return out.filter(([a]) => {
+    const k = `${String(a.wallet_address).toLowerCase()}#${a.revision}`;
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
@@ -295,7 +401,7 @@ function main() {
     console.log('');
   }
 
-  const records = collectAttestations(doc.bundles ? doc.bundles : doc);
+  const records = collectPairs(doc);
   if (!records.length) {
     console.error('no wallet attestations found in that file');
     process.exit(2);
@@ -303,13 +409,20 @@ function main() {
 
   const showIdx = args.includes('--show') ? Number(args[args.indexOf('--show') + 1]) : null;
   let failed = 0;
-  records.forEach((r, i) => {
-    const v = verifyRecord(r);
+  records.forEach(([rec, holder], i) => {
+    const v = verifyRecord(rec, holder);
     const ok = v.problems.length === 0;
     if (!ok) failed++;
-    console.log(`[${i}] ${ok ? 'PASS' : 'FAIL'}  ${v.wallet}  rev ${v.revision}  ${v.principal}`);
+    const who = v.legalName ? `  ${v.legalName}` : '';
+    console.log(
+      `[${i}] ${ok ? 'PASS' : 'FAIL'}  ${v.wallet}  rev ${v.revision}  ` +
+        `holder rev ${v.holderRevision}${who}  ${v.principal}`,
+    );
     v.problems.forEach((p) => console.log(`       ! ${p}`));
     if (showIdx === i) {
+      console.log('\n--- holder commitment preimage (sha256 of these exact bytes) ---');
+      console.log(serialiseHolder(holder));
+      console.log(`--- sha256 = ${v.holderCommit}`);
       console.log('\n--- commitment preimage (sha256 of these exact bytes) ---');
       console.log(v.preimage);
       console.log(`--- sha256 = ${v.commit}`);

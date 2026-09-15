@@ -69,6 +69,7 @@ export const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
   });
   const WalletAttestation = IDL.Record({
     revision: IDL.Nat32,
+    holder_revision: IDL.Nat32,
     wallet_address: IDL.Text,
     linked_principal: IDL.Principal,
     detected_eth: IDL.Nat,
@@ -298,6 +299,7 @@ export interface HolderProfile {
 
 export interface WalletAttestation {
   revision: number;
+  holder_revision: number;
   wallet_address: string;
   linked_principal: Principal;
   detected_eth: bigint;

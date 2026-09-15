@@ -10,12 +10,15 @@ import { backendActor } from '../lib/auth';
 import { buildAttestationMessage } from '../lib/message';
 import {
   commitAttest,
+  commitHolder,
+  holderToCommit,
   type AttestPayloadForCommit,
   type PositionDetail as CommitPosition,
 } from '../lib/dataCommitment';
 import {
   unwrap,
   type AttestPayload,
+  type HolderProfile,
   type WalletAttestation,
   type PositionDetail,
   type PostIncidentAcquisition,
@@ -27,9 +30,13 @@ import { formatMultibtc, parseMultibtc, shortAddress } from '../lib/format';
 interface Props {
   walletAddress: string;
   principal: Principal;
+  /** The holder profile in force. Its identity and hash go into the signed bytes. */
+  holder: HolderProfile;
   initial: WalletAttestation | null;
   onSaved: (w: WalletAttestation) => void;
 }
+
+
 
 function posToCommit(p: PositionDetail): CommitPosition {
   return {
@@ -46,7 +53,7 @@ function posToCommit(p: PositionDetail): CommitPosition {
   };
 }
 
-export function WalletAttestationForm({ walletAddress, principal, initial, onSaved }: Props) {
+export function WalletAttestationForm({ walletAddress, principal, holder, initial, onSaved }: Props) {
   const { address: connected } = useAccount();
   const { signMessageAsync } = useSignMessage();
 
@@ -185,7 +192,15 @@ export function WalletAttestationForm({ walletAddress, principal, initial, onSav
         podReferenceForThisWallet: podRefHere.trim() === '' ? null : podRefHere.trim(),
         supportTxHashes: supportTxHashes.map((h) => h.trim()).filter((h) => h !== ''),
       };
-      const commit = await commitAttest(commitPayload, principal.toText(), revision);
+      const holderRevision = Number(holder.revision);
+      const holderCommit = await commitHolder(holderToCommit(holder));
+      const commit = await commitAttest(
+        commitPayload,
+        principal.toText(),
+        revision,
+        holderRevision,
+        holderCommit,
+      );
       const signed_at_iso = new Date().toISOString();
       const actor = await backendActor();
       const nonce = unwrap(await actor.get_attest_nonce(walletAddress.toLowerCase()));
@@ -193,6 +208,10 @@ export function WalletAttestationForm({ walletAddress, principal, initial, onSav
         walletAddress.toLowerCase(),
         principal.toText(),
         revision,
+        holder.legal_name,
+        holder.date_of_birth_iso,
+        holderRevision,
+        holderCommit,
         commit,
         signed_at_iso,
         nonce,

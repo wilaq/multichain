@@ -48,10 +48,15 @@ const ATTESTATION_BODY: &str = concat!(
     "\n",
 );
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_attestation_message(
     address_lower_hex: &str,
     principal_text: &str,
     revision: u32,
+    legal_name: &str,
+    date_of_birth_iso: &str,
+    holder_revision: u32,
+    holder_commitment_hex: &str,
     data_commitment_sha256_hex: &str,
     signed_at_iso: &str,
     nonce: &str,
@@ -66,6 +71,20 @@ pub fn build_attestation_message(
     s.push('\n');
     s.push_str("Revision:         ");
     s.push_str(&revision.to_string());
+    s.push('\n');
+    // The holder's own name and DOB are in the text the wallet displays, so the
+    // signature demonstrably covers who is claiming -- not just what they hold.
+    // The profile hash pins every other field of that exact revision.
+    s.push_str("Holder:           ");
+    s.push_str(legal_name);
+    s.push('\n');
+    s.push_str("Date of birth:    ");
+    s.push_str(date_of_birth_iso);
+    s.push('\n');
+    s.push_str("Holder profile:   revision ");
+    s.push_str(&holder_revision.to_string());
+    s.push_str(", 0x");
+    s.push_str(holder_commitment_hex);
     s.push('\n');
     s.push_str("Data commitment:  0x");
     s.push_str(data_commitment_sha256_hex);
@@ -142,6 +161,9 @@ Nonce:     11111111-1111-4111-8111-111111111111";
         "Wallet:           0xd381e358d6b4e176559d3d76109985ed83259aec\n",
         "Linked principal: aaaaa-aa\n",
         "Revision:         0\n",
+        "Holder:           Alice Smith\n",
+        "Date of birth:    1980-01-01\n",
+        "Holder profile:   revision 3, 0x00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n",
         "Data commitment:  0x0000000000000000000000000000000000000000000000000000000000000000\n",
         "Timestamp:        2026-05-13T18:00:00Z\n",
         "Nonce:            11111111-1111-4111-8111-111111111111",
@@ -153,11 +175,36 @@ Nonce:     11111111-1111-4111-8111-111111111111";
             "0xd381e358d6b4e176559d3d76109985ed83259aec",
             "aaaaa-aa",
             0,
+            "Alice Smith",
+            "1980-01-01",
+            3,
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
             "0000000000000000000000000000000000000000000000000000000000000000",
             "2026-05-13T18:00:00Z",
             "11111111-1111-4111-8111-111111111111",
         );
         assert_eq!(m, ATTESTATION_GOLDEN);
+    }
+
+    /// The signer must be shown the name they are attesting under, so a changed
+    /// identity has to change the bytes the wallet signs.
+    #[test]
+    fn identity_is_inside_the_signed_bytes() {
+        let m = build_attestation_message(
+            "0xd381e358d6b4e176559d3d76109985ed83259aec",
+            "aaaaa-aa",
+            0,
+            "Bob Jones",
+            "1990-02-02",
+            3,
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "2026-05-13T18:00:00Z",
+            "11111111-1111-4111-8111-111111111111",
+        );
+        assert!(m.contains("Holder:           Bob Jones"));
+        assert!(m.contains("Date of birth:    1990-02-02"));
+        assert_ne!(m, ATTESTATION_GOLDEN);
     }
 
     #[test]

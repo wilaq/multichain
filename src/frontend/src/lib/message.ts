@@ -24,6 +24,10 @@ export function buildAttestationMessage(
   addressLowerHex: string,
   principalText: string,
   revision: number,
+  legalName: string,
+  dateOfBirthIso: string,
+  holderRevision: number,
+  holderCommitmentHex: string,
   dataCommitmentSha256Hex: string,
   signedAtIso: string,
   nonce: string,
@@ -49,6 +53,9 @@ export function buildAttestationMessage(
     `Wallet:           ${addressLowerHex}\n` +
     `Linked principal: ${principalText}\n` +
     `Revision:         ${revision}\n` +
+    `Holder:           ${legalName}\n` +
+    `Date of birth:    ${dateOfBirthIso}\n` +
+    `Holder profile:   revision ${holderRevision}, 0x${holderCommitmentHex}\n` +
     `Data commitment:  0x${dataCommitmentSha256Hex}\n` +
     `Timestamp:        ${signedAtIso}\n` +
     `Nonce:            ${nonce}`

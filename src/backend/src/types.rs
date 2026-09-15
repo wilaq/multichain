@@ -313,6 +313,10 @@ pub struct PostIncidentAcquisition {
 #[derive(Clone, Debug, CandidType, Serialize, Deserialize)]
 pub struct WalletAttestation {
     pub revision: u32,
+    /// The holder-profile revision this signature covers. If the holder later
+    /// edits their profile this goes stale, which is what the UI keys its
+    /// "needs re-signing" warning off.
+    pub holder_revision: u32,
     pub wallet_address: String, // lowercased 0x...
     pub linked_principal: Principal,
 

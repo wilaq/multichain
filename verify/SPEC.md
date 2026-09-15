@@ -16,10 +16,12 @@ implementation against the canister's own published test vectors.
 
 **Establishes.** At the recorded timestamp, a party in possession of the private
 key for Ethereum address `W` produced an ECDSA signature over a message that
-names `W`, names Internet Identity principal `P`, names a revision number, and
-commits (SHA-256) to every field of the declaration. The declaration therefore
+names `W`, names Internet Identity principal `P`, names a revision number,
+**names the holder's legal name and date of birth in plain text, and commits
+(SHA-256) to every other field of that holder profile revision**, and commits
+(SHA-256) to every field of the wallet declaration. The declaration therefore
 cannot be altered after signing without invalidating the signature, and cannot
-be transplanted to a different address, identity, or revision.
+be transplanted to a different address, identity, profile, or revision.
 
 **Does not establish.**
 
@@ -31,15 +33,73 @@ be transplanted to a different address, identity, or revision.
    verification of them. They are bound by the signature (so they are
    tamper-evident, and are attested under penalty of perjury per clause 5 of the
    message body) but they are not independently proven.
-3. **The principal is not a person.** `linked_principal` is an Internet Identity
-   principal. The legal name, date of birth and nationality in the holder
-   profile are self-declared and are not part of the per-wallet signature.
+3. **The principal is not a person, and the identity is self-declared.**
+   `linked_principal` is an Internet Identity principal; the legal name, date of
+   birth and nationality are asserted by the claimant, not verified against any
+   document. They *are* covered by the signature (§2b), so the claimant
+   demonstrably signed under that name and cannot later swap it without
+   invalidating the record — but no third party has checked that the name is
+   theirs.
 4. **This is not an executed mandate.** Clause 3 of the message body expresses an
    intention to authorise representation. Whether an electronic signature can
    *create* such an authority is a question of the governing law — note in
    particular that the First Schedule to Singapore's Electronic Transactions Act
    2010 excludes powers of attorney from the Act's electronic signature
    provisions. The operative retainer is executed off-platform.
+
+---
+
+## 2b. Holder profile commitment
+
+The holder profile is mutable — it can be revised up to 20 times with only an
+Internet Identity session, and no wallet signature. So each wallet attestation
+binds the exact profile revision that was in force when it was signed, and a
+later edit leaves earlier attestations pointing at the older revision rather
+than silently acquiring a new identity.
+
+Same conventions as §2: `key=value` lines joined by `\n` with no trailing
+newline, fixed lexicographic order, text as lowercase hex of its UTF-8 bytes,
+absent optional values as the empty string.
+
+| Line | Value encoding |
+|---|---|
+| `ack_engagement_letter_to_follow` | `true` / `false` |
+| `ack_fee_structure` | `true` / `false` |
+| `ack_group_strategy_coordinated` | `true` / `false` |
+| `ack_site_not_affiliated` | `true` / `false` |
+| `additional_documentation_notes` | hex(UTF-8), empty if absent |
+| `consent_data_use_for_legal` | `true` / `false` |
+| `consent_group_representation` | `true` / `false` |
+| `country_of_residence` | hex(UTF-8) |
+| `date_of_birth_iso` | hex(UTF-8) |
+| `email` | hex(UTF-8) |
+| `fee_preference` | `UpfrontCostShare` / `LitigationFunding` / `ProportionalToClaim` / `Undecided` |
+| `has_filed_pod` | `true` / `false` |
+| `legal_name` | hex(UTF-8) |
+| `naming_preference` | `WillingToBeNamed` / `AnonymousViaRepresentative` |
+| `nationality` | hex(UTF-8) |
+| `needs_help_filing_pod` | `true` / `false` |
+| `other_multichain_claims` | hex(UTF-8), empty if absent |
+| `pod_filed_date_iso` | hex(UTF-8), empty if absent |
+| `pod_reference` | hex(UTF-8), empty if absent |
+| `preferred_comm_channel` | `Email` / `Telegram` / `Other:<hex(text)>` |
+| `preferred_payment_method` | hex(UTF-8), empty if absent |
+| `principal` | principal in textual form |
+| `revision` | decimal integer |
+| `submitted_at_ns` | decimal integer, Internet Computer consensus time |
+| `telegram_handle` | hex(UTF-8), empty if absent |
+| `truthfully_attested` | `true` / `false` |
+
+`holder_commitment` in §2 is `SHA-256` of these bytes, lowercase hex, no `0x`.
+
+Note that the seven `consent_*` / `ack_*` / `truthfully_attested` booleans can
+only ever be `true`: the canister rejects a profile where any of them is false,
+so they record that the form was completed rather than carrying independent
+evidentiary weight. The operative consent language is clauses 3–5 of the signed
+message body in §3, which the wallet signs directly.
+
+A reference vector is in `selftest.mjs` (`GOLDEN_HOLDER`) and in the canister's
+`commitment.rs::golden_holder_serialisation`.
 
 ---
 
@@ -64,6 +124,8 @@ line. Absent optional values render as the empty string.
 | `detected_eth` | decimal integer |
 | `detected_polygon` | decimal integer |
 | `held_pre_incident` | `true` / `false` |
+| `holder_commitment` | 64 lowercase hex chars, no `0x` — see §2b |
+| `holder_revision` | decimal integer, the profile revision this signature covers |
 | `linked_principal` | principal in textual form, e.g. `aaaaa-aa` |
 | `pod_filed_for_this_wallet` | `true` / `false` |
 | `pod_reference_for_this_wallet` | hex(UTF-8), empty if absent |
@@ -135,6 +197,9 @@ I, the controller of this wallet, declare:
 Wallet:           <lowercase 0x address>
 Linked principal: <principal text>
 Revision:         <decimal>
+Holder:           <legal name, verbatim>
+Date of birth:    <YYYY-MM-DD>
+Holder profile:   revision <decimal>, 0x<64 hex chars from §2b>
 Data commitment:  0x<64 hex chars from §2>
 Timestamp:        <ISO-8601 UTC, as supplied by the signer's browser>
 Nonce:            <UUID v4 issued by the canister>
@@ -169,8 +234,12 @@ EIP-191 `personal_sign`:
    address, and compare case-insensitively to `wallet_address`.
 
 A verifier must **rebuild** the message from §3 rather than trusting the
-`signed_message` string stored on the record, and must **recompute** the
-commitment from §2 rather than trusting `data_commitment_sha256`. Both stored
+`signed_message` string stored on the record, must **recompute** the commitment
+from §2 rather than trusting `data_commitment_sha256`, and must **recompute**
+the holder commitment from §2b against the profile revision named by the
+record's `holder_revision` — not against the holder's current profile. An export
+carries the holder's full revision history precisely so the right one can be
+selected. Both stored
 copies are conveniences; the derived values are authoritative. `verifyRecord`
 reports a mismatch between stored and derived as a failure.
 
@@ -207,9 +276,11 @@ hash on load.
 ## 6. Notes for a certifying witness
 
 For US Federal Rule of Evidence 902(13)/(14) purposes, the certifying person
-should be able to state: what the system does (§1), that the export's SHA-256
-matches the manifest, that `node selftest.mjs` passes against the canister's
-published vectors, that `verify-attestation.mjs` reports every record as PASS,
+should be able to state: what the system does and does not establish (§1), that
+the export's SHA-256 matches the manifest, that `node selftest.mjs` passes
+against the canister's published vectors, that `verify-attestation.mjs` reports
+every record as PASS — which includes confirming that the identity each
+signature was made under is the identity presented with the claim —
 and that the module hash obtained from the Internet Computer matches the code
 commit relied upon. Rule 902(13)/(14) also require advance written notice to
 opposing parties and a certification meeting Rule 902(11)/(12).
