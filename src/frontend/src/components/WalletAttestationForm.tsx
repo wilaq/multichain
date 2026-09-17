@@ -163,7 +163,12 @@ export function WalletAttestationForm({ walletAddress, principal, holder, initia
     setValidationErrors([]);
     setBusy(true);
     try {
-      const approxTotalBI = approxTotal.trim() === '' ? null : parseMultibtc(approxTotal);
+      let approxTotalBI: bigint | null = null;
+      if (approxTotal.trim() !== '') {
+        const parsedTotal = parseMultibtc(approxTotal);
+        if (!parsedTotal.ok) throw new Error(`Approximate total claim: ${parsedTotal.error}`);
+        approxTotalBI = parsedTotal.value;
+      }
 
       const commitPayload: AttestPayloadForCommit = {
         walletAddress: walletAddress.toLowerCase(),

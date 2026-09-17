@@ -3,7 +3,22 @@ import { useState } from 'react';
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { AmountInput, UsdInput } from './AmountInput';
-import { formatMultibtc, parseMultibtc } from '../lib/format';
+import { formatMultibtc } from '../lib/format';
+
+/**
+ * The parser exactly as it was when the defect shipped. Inlined on purpose: this
+ * test documents historical behaviour, so it must not drift when format.ts
+ * changes. (It is also why "1,5" used to become 15.)
+ */
+function legacyParse(text: string): bigint {
+  const t = text.trim();
+  if (t.length === 0) return 0n;
+  const [whole, frac = ''] = t.split('.');
+  const wholeBI = BigInt(whole.replace(/[^0-9-]/g, '') || '0');
+  const fracBI = BigInt((frac + '00000000').slice(0, 8));
+  const sign = whole.trim().startsWith('-') ? -1n : 1n;
+  return sign * (wholeBI * 100_000_000n + (sign < 0n ? -fracBI : fracBI));
+}
 
 afterEach(cleanup);
 
@@ -24,7 +39,7 @@ describe('the defect this component exists to prevent', () => {
         aria-label="legacy"
         value={formatMultibtc(v, 8).replace(/\.?0+$/, '')}
         onChange={(e) => {
-          const parsed = parseMultibtc(e.target.value);
+          const parsed = legacyParse(e.target.value);
           setV(parsed);
           onValue(parsed);
         }}

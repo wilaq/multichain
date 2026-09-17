@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { formatMultibtc, parseMultibtc } from '../lib/format';
+import { formatMultibtc, parseMultibtc, MULTIBTC_DECIMALS } from '../lib/format';
 
 /**
  * Text inputs for amounts must hold the raw text the user typed.
@@ -27,6 +27,7 @@ export function AmountInput({
   className?: string;
 }) {
   const [text, setText] = useState(() => compact(value));
+  const [problem, setProblem] = useState<string | null>(null);
   // Tracks what we last emitted, so a value changed from the outside (e.g.
   // "Prefill from detected", or this row being reused for a different item after
   // a removal) re-seeds the text, while our own keystrokes do not.
@@ -40,27 +41,31 @@ export function AmountInput({
   }, [value]);
 
   return (
-    <input
-      className={className}
-      inputMode="decimal"
-      placeholder={placeholder}
-      value={text}
-      onChange={(e) => {
-        const next = e.target.value;
-        setText(next);
-        let parsed: bigint;
-        try {
-          parsed = parseMultibtc(next);
-        } catch {
-          // parseMultibtc throws on things like "1.5 BTC"; keep the last good
-          // number rather than crashing the form mid-keystroke.
-          return;
-        }
-        lastEmitted.current = parsed;
-        onValue(parsed);
-      }}
-      onBlur={() => setText(compact(lastEmitted.current))}
-    />
+    <>
+      <input
+        className={className}
+        inputMode="decimal"
+        placeholder={placeholder}
+        value={text}
+        onChange={(e) => {
+          const next = e.target.value;
+          setText(next);
+          const parsed = parseMultibtc(next);
+          if (!parsed.ok) {
+            // Keep the last good number rather than storing a guess.
+            setProblem(parsed.error);
+            return;
+          }
+          setProblem(
+            parsed.truncated ? `Rounded down to ${MULTIBTC_DECIMALS} decimal places.` : null,
+          );
+          lastEmitted.current = parsed.value;
+          onValue(parsed.value);
+        }}
+        onBlur={() => setText(compact(lastEmitted.current))}
+      />
+      {problem && <div className="mt-1 text-xs text-amber-700">{problem}</div>}
+    </>
   );
 }
 
