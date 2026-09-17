@@ -1,7 +1,7 @@
 import type { PositionDetail, PositionTypeVariant } from '../lib/backend';
 import { CHAIN_KEYS, type SupportedChainId } from '../lib/wagmi';
-import { formatMultibtc, parseMultibtc } from '../lib/format';
 import { Field } from './Field';
+import { AmountInput } from './AmountInput';
 
 const CHAIN_OPTS: { value: string; label: string }[] = [
   { value: CHAIN_KEYS[1], label: 'Ethereum' },
@@ -106,14 +106,10 @@ export function PositionsEditor({
                 </select>
               </Field>
               <Field label="Declared multiBTC" required>
-                <input
-                  className="field-input"
-                  inputMode="decimal"
+                <AmountInput
+                  value={p.declared_multibtc}
                   placeholder="0.00000000"
-                  value={formatMultibtc(p.declared_multibtc, 8).replace(/\.?0+$/, '')}
-                  onChange={(e) =>
-                    update(i, { ...p, declared_multibtc: parseMultibtc(e.target.value) })
-                  }
+                  onValue={(v) => update(i, { ...p, declared_multibtc: v })}
                 />
               </Field>
             </div>

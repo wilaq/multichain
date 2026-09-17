@@ -1,7 +1,7 @@
 import type { PostIncidentAcquisition } from '../lib/backend';
 import { CHAIN_KEYS } from '../lib/wagmi';
-import { formatMultibtc, parseMultibtc } from '../lib/format';
 import { Field } from './Field';
+import { AmountInput, UsdInput } from './AmountInput';
 
 const CHAIN_OPTS: { value: string; label: string }[] = [
   { value: CHAIN_KEYS[1], label: 'Ethereum' },
@@ -73,22 +73,16 @@ export function PostIncidentAcquisitionsEditor({
               </select>
             </Field>
             <Field label="Amount multiBTC" required>
-              <input
-                className="field-input"
-                inputMode="decimal"
-                value={formatMultibtc(a.amount_multibtc, 8).replace(/\.?0+$/, '')}
-                onChange={(e) => update(i, { ...a, amount_multibtc: parseMultibtc(e.target.value) })}
+              <AmountInput
+                value={a.amount_multibtc}
+                placeholder="0.00000000"
+                onValue={(v) => update(i, { ...a, amount_multibtc: v })}
               />
             </Field>
             <Field label="Price paid (USD, optional)">
-              <input
-                className="field-input"
-                inputMode="decimal"
-                value={a.price_paid_usd.length > 0 ? String(a.price_paid_usd[0]) : ''}
-                onChange={(e) => {
-                  const v = e.target.value.trim();
-                  update(i, { ...a, price_paid_usd: v === '' ? [] : [Number(v)] });
-                }}
+              <UsdInput
+                value={a.price_paid_usd}
+                onValue={(v) => update(i, { ...a, price_paid_usd: v })}
               />
             </Field>
           </div>
