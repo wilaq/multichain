@@ -24,7 +24,7 @@ import {
   type PostIncidentAcquisition,
   type BridgeAttempt,
 } from '../lib/backend';
-import type { SupportedChainId } from '../lib/wagmi';
+import { CHAIN_LABELS, type SupportedChainId } from '../lib/wagmi';
 import { formatMultibtc, parseMultibtc, shortAddress } from '../lib/format';
 
 interface Props {
@@ -63,6 +63,7 @@ export function WalletAttestationForm({ walletAddress, principal, holder, initia
     137: 0n,
     7700: 0n,
   });
+  const [failedChains, setFailedChains] = useState<SupportedChainId[]>([]);
   const [positions, setPositions] = useState<PositionDetail[]>(initial?.positions ?? []);
   const initialApproxClaim = initial?.approximate_total_claim[0];
   const [approxTotal, setApproxTotal] = useState<string>(
@@ -294,7 +295,11 @@ export function WalletAttestationForm({ walletAddress, principal, holder, initia
           </div>
         )}
 
-        <BalanceTable address={walletAddress} onBalances={setDetected} />
+        <BalanceTable
+          address={walletAddress}
+          onBalances={setDetected}
+          onFailures={setFailedChains}
+        />
 
         <section className="space-y-2">
           <PositionsEditor
@@ -413,6 +418,19 @@ export function WalletAttestationForm({ walletAddress, principal, holder, initia
             </label>
           )}
         </section>
+
+        {failedChains.length > 0 && (
+          <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+            <strong>
+              Could not read your balance on{' '}
+              {failedChains.map((c) => CHAIN_LABELS[c]).join(', ')}.
+            </strong>{' '}
+            Signing now records <strong>0</strong> for{' '}
+            {failedChains.length === 1 ? 'that chain' : 'those chains'}, which cannot be told apart
+            from genuinely holding none. Use Refresh above and wait for a balance before signing —
+            or declare the amount in Positions if you know it.
+          </div>
+        )}
 
         {error && <div className="text-sm text-red-600">{error}</div>}
 

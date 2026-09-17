@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useReadContracts } from 'wagmi';
 import { erc20BalanceAbi, MULTIBTC } from '../lib/contracts';
 import { CHAIN_LABELS, type SupportedChainId } from '../lib/wagmi';
@@ -7,11 +7,13 @@ import { formatMultibtc } from '../lib/format';
 interface Props {
   address: string;
   onBalances?: (b: Record<SupportedChainId, bigint>) => void;
+  /** Chains whose balanceOf call failed. Their balance is reported as 0. */
+  onFailures?: (chains: SupportedChainId[]) => void;
 }
 
 const CHAINS: SupportedChainId[] = [1, 56, 137, 7700];
 
-export function BalanceTable({ address, onBalances }: Props) {
+export function BalanceTable({ address, onBalances, onFailures }: Props) {
   const contracts = useMemo(
     () =>
       CHAINS.map((cid) => ({
@@ -41,6 +43,18 @@ export function BalanceTable({ address, onBalances }: Props) {
     });
     return out;
   }, [data]);
+
+  // A failed read is indistinguishable from a zero balance once it reaches the
+  // payload, so the chains that failed have to travel upward too.
+  const failed = useMemo(
+    () => CHAINS.filter((cid, i) => data?.[i]?.status === 'failure'),
+    [data],
+  );
+  const failedSig = failed.join(',');
+  useEffect(() => {
+    onFailures?.(failed);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failedSig]);
 
   // Surface balances upward when they change.
   const sig = JSON.stringify({
